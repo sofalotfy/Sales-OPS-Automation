@@ -1,0 +1,66 @@
+# Research: AI Sales Inquiry Triage
+
+**Date**: 2026-09-12
+**Purpose**: Resolve technical unknowns surfaced during planning of the AI inquiry triage feature (a new Laravel widget service that retrieves RAG context and routes a visitor's sales inquiry via an AI to decline/escalate/booking).
+**Source Feature**: [spec.md](./spec.md)
+
+Context: an existing stack of `db` (pgvector), `auth-service` (opaque bearer tokens, `POST /auth/login` → `LoginResponse{access_token, token_type, expires_at}`), `work-scope-rag` (document ingestion + `POST /query` vector retrieval, all routes behind `require_valid_token`), and `dashboard` (Laravel 13 on PHP 8.4, port 8002). Constitution Gates: I (HTTP-only between services, independent Dockerfiles), II (UIs exempt from the FastAPI default; dashboard precedent already uses Laravel), III (human-in-the-loop for ambiguity is NON-NEGOTIABLE — nothing silently drops or auto-resolves), IV (Postgres is the single source of business state), V (smallest version that satisfies the spec; stubs over speculative generalization). Stakeholder explicitly wanted: a **Laravel** service exposing a **widget** with **optional name/email** contact fields alongside the message; an **AI call to Groq** with an open-source model keyed via an env var; a **clearly separated system-prompt injection point** combining the user inquiry plus RAG documents; **three separate PHP handler classes in the same folder** (decline / escalate / booking link); and a **message-extraction** step (plain text now, external app schema later). For v1, **escalate does nothing beyond returning a decision response to the inquirer**; no persistence, webhook, email, or CRM delivery (per Clarifications).
+
+## 1. Which RAG endpoint serves retrieval, and what auth does it need?
+
+- **Decision**: Reuse the existing `work-scope-rag` **`POST /query`** endpoint exactly as-is. Body: `{query, top_k?, filters?}`; response `{success, query, result_count, results:[{rank, text, similarity_score, document_id, source, title, chunk_index}]}`. It already filters to `status == "ready"` documents, applies the relevance threshold in `app/services/retrieval.py`, and embeds the query with the service's configured embedding model — so the widget gets grounded, ready-only context with zero new RAG code.
+- **Rationale**: The endpoint already exists with a stable contract (covered by `tests/contract/test_query.py` and `tests/integration/test_query_retrieval.py` in the repo). Constitution Gate I and the dashboard precedent (`RagApiClient`) both model backend consumption as a thin HTTP `Http` client. The one wrinkle — the endpoint sits behind `require_valid_token` — is solved by the service-account pattern (§2), which requires **no** changes to the RAG service.
+- **Alternatives considered**: Building a query endpoint in the widget (rejected — violates Gate I and duplicates owned logic); relaxing the RAG auth guard for the widget (rejected — weakens the existing API contract and would still need the same token story for everything else); embedding the RAG's embedding model in the widget to self-query pgvector (rejected — directly reaches into another service's DB, violating Gate I/IV).
+
+## 2. How does a public widget obtain a valid bearer token for `POST /query`?
+
+- **Decision**: The widget uses a **dedicated service account**. It reads `SERVICE_USERNAME` / `SERVICE_PASSWORD` from env, logs in to `auth-service POST /auth/login` on first need, and caches the returned `access_token` **in memory** (`app/Support/ServiceToken.php`). Any `401` from RAG, or an expired `expires_at`, triggers a re-login and a single retry before erroring.
+- **Rationale**: `POST /query` requires a valid opaque bearer token; a visitor-facing widget has no human session to borrow. A service account is exactly what the auth-service is designed for (register such an account in `auth-service` via its user management), and the token never leaves the server process. This keeps constitution Gate IV intact (identity still lives in auth-service/db) and Gate I intact (only HTTP across the boundary).
+- **Alternatives considered**: Reusing the logged-in admin session (rejected — the widget is public; there is no admin session, and coupling a visitor flow to operator credentials is wrong); a long-lived API key shipped in env and presented directly (rejected — no such mechanism exists in `work-scope-rag`; tokens are the established contract); running `/query` unauthenticated (rejected — security regression).
+
+## 3. How to call the AI (Groq, open-source model) and isolate the provider
+
+- **Decision**: Use Groq's **OpenAI-compatible Chat Completions API** (`https://api.groq.com/openai/v1/chat/completions`) over HTTPS with Laravel's `Http` client. Config via env: `GROQ_API_KEY` (the API key) and `GROQ_MODEL` (e.g. a current open-source hosted model like `llama-3.3-70b-versatile`). The call is isolated behind a single class, `app/Services/AiCallingService.php`, so the provider/model can be swapped by editing env vars alone (mirrors constitution's "provider isolated behind a thin wrapper").
+- **Rationale**: Groq serves open-weight models (Llama, Qwen, Gemma, etc.) through a drop-in OpenAI-compatible endpoint, so a bare `Http::post` with `Authorization: Bearer {{GROQ_API_KEY}}` is sufficient — no extra PHP package needed, which keeps the dependency surface minimal and the key out of code. The messenger message shape (`role`/`content`) is stable for every Groq-hosted open-source model currently offered.
+- **Alternatives considered**: `openai-php/client` package (rejected — an extra dependency with no benefit over the built-in `Http` client for one stateless call); OpenAI's own API with a proprietary model (rejected — stakeholder explicitly asked for an open-source model on Groq with an env-var key); Anthropic Messages API (rejected — constitution's default provider is superseded by the explicit stakeholder instruction, and the wrapper keeps the swap cheap).
+
+## 4. Where exactly does the system prompt get injected, and how do we honor FR-012 (content is data)?
+
+- **Decision**: A single, explicit **`PromptBuilder`** class is the ONLY place the system prompt is assembled. It composes three strictly delimited parts:
+  1. a **fixed system prompt** (constant string describing the company, the triage rules, and the strict JSON output contract);
+  2. the **user inquiry** wrapped in a `USER INQUIRY` data block;
+  3. the **retrieved RAG documents** wrapped in a `RETRIEVED DOCUMENTS` data block.
+  The instruction set (system prompt) is a constant; the inquiry and documents are injected as *content to reason about*, never as instructions. `PromptBuilder` unit tests assert the three blocks exist separately and that no user/retrieved text can sit inside the system role.
+- **Rationale**: FR-004/FR-012 (question + retrieved chunks passed to the AI with the system prompt clearly separated; content treated strictly as data) plus the stakeholder's explicit ask that "the AI calling service must be clear about where the system prompt is injected." Putting the assembly in one class with tests makes FR-012 verifiable — a reviewer can read `PromptBuilder` and see the boundary.
+- **Alternatives considered**: Building the prompt inline in the controller or `AiCallingService` (rejected — hides the injection point and makes testing the boundary awkward); a generic template engine (rejected — unnecessary abstraction at this scale, constitution V).
+
+## 5. Disposition contract and the three handler classes
+
+- **Decision**: The AI MUST answer with a **strict JSON object** — request-time `response_format` (Groq `json_object` mode) plus an explicit requirement in the prompt: `{"disposition": "decline" | "escalate" | "booking", "reply": "<visitor-facing message>", "reasoning": "<internal justification>"}`. `Dispatcher` is the strict map: `decline → DeclineHandler`, `escalate → EscalateHandler`, `booking → BookingHandler`. **Any** unparseable output, JSON that fails validation, an unexpected `disposition` value, or a handler precondition failure (e.g. booking with no `BOOKING_URL` configured) defaults to `EscalateHandler`.
+  - `EscalateHandler`: for v1 returns a simple response to the inquirer indicating the escalate decision was taken; performs no further action (per Clarifications).
+- **Rationale**: The failure-landing-on-escalate rule is exactly constitution III and spec FR-009/FR-010. Three concrete, short handler classes in `app/Triage/Handlers/` satisfying the user's "three tools in different PHP classes in the same folder," and each handler returning a uniform `TriageResult{disposition, reply, reasoning, context}` so the widget renders any outcome consistently.
+- **Alternatives considered**: A single if/else in the controller (rejected — violates the explicit stakeholder directive and makes escalation-by-default harder to test); a decision tree library (rejected — speculative complexity, constitution V); letting the AI return free text (rejected — no testable disposition, unsafe).
+
+## 6. Message extraction ("hall service") for the inbound payload
+
+- **Decision**: A dedicated **`MessageExtractor`** class normalizes an inbound payload to a single canonical message string before triage. For v1 it accepts two shapes: plain text (`{"message": "...", "name?": "...", "email?": "..."}` from the widget), with optional contact fields passed through but not sent to the AI. The class exposes a single `extract(array $payload): string` seam; an external-app structured schema would be handled by adding another shape branch inside it later (labeled with a clear TODO), not by a framework.
+- **Rationale**: FR-013 (normalize inbound payloads; plain text now, schema-ready for external apps), FR-001/FR-002 (optional name/email fields on the widget, valid email format if provided), and the stakeholder's explicit "message extraction service." A single class with a documented TODO seam satisfies "clear path for structured schemas" without speculative adapter-generalization (constitution V).
+- **Alternatives considered**: Multiple `*PayloadAdapter` classes now (rejected — speculative; no external schema exists yet); validating unknowns in the controller (rejected — FR-013 calls it out as extraction's job, and unit-testing the seam is cleaner).
+
+## 7. Where to record/deliver escalations for v1 (human-in-the-loop hand-off)
+
+- **Decision**: For v1, an escalation result is **returned in the widget response** as the disposition decision only — no persistence, no operator log, no webhook, no CRM delivery. The inquirer receives a response indicating the escalation decision was taken; the system performs no further action. The real escalation mechanism is deferred (per Clarifications: "we don't know what exactly it will do now").
+- **Rationale**: The stakeholder explicitly ruled out any automation here in v1 ("just make it send a response indicating it took this decision and do nothing"). This satisfies constitution III at the triage layer — ambiguity does not silently resolve into a different disposition, nothing is guessed or dropped — while honoring principle V (smallest version that satisfies the spec). The actual hand-off (escalation record, email, CRM push, operator dashboard) remains an open requirement for a future iteration. The `Escalation Record` entity is therefore a **transitory in-memory DTO** only (not persisted to any store), and the operator-logging task from the prior plan iteration is removed.
+- **Alternatives considered**: Error-level log entries for operator visibility (rejected per stakeholder instruction — do nothing beyond the response); persisting in Postgres via a new table (rejected — stakeholder said do nothing, and constitution IV ownership of that table is undefined); webhook/email delivery (stakeholder said do nothing); HubSpot/CRM push (stakeholder said do nothing). All rejected by explicit stakeholder decision.
+
+## Decision Log Summary
+
+| Decision | Chosen | Key alternative rejected |
+|----------|--------|--------------------------|
+| RAG retrieval | Existing `work-scope-rag POST /query` via thin `Http` client | Widget-side query endpoint, relaxing RAG auth, self-embedding pgvector |
+| RAG auth | Dedicated service account → `auth-service POST /auth/login`, in-memory token, re-auth on 401 | Admin session reuse, long-lived key, unauthenticated /query |
+| AI provider | Groq OpenAI-compatible Chat Completions via Laravel `Http`; `GROQ_API_KEY`/`GROQ_MODEL` env | openai-php client, Anthropic (const. default), proprietary model |
+| Prompt injection point | Single `PromptBuilder` with strictly separated fixed prompt / user inquiry / RAG docs | Inline prompt assembly, generic template engine |
+| Disposition routing | Strict JSON contract → `Dispatcher` → 3 handler classes; escalate-by-default on any failure | if/else in controller, decision-tree library, free-text AI output |
+| Message extraction | `MessageExtractor` with plain-text shape + TODO seam for structured schemas; optional name/email passthrough | Multi-adapter framework now, controller-level validation |
+| Escalation delivery (v1) | Return decision response to inquirer only — no persistence, no log, no webhook; mechanism deferred | Log entries, Postgres table, email/webhook, CRM push |

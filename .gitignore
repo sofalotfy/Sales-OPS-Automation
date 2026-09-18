@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Secrets — NEVER commit environment files (contain the bootstrap admin password)
+.env
+*.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Spec Kit machine-local state
+.specify/feature.json
