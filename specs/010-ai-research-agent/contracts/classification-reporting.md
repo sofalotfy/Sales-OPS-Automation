@@ -26,10 +26,12 @@ heavy `web_research` payload remains detail-only.
   "phone_number": "+1 555 0132",
   "company_name": "Example Corp",
   "country_region": "United Kingdom",
-  "classification": "low",
-  "final_score": 0.0,
-  "reasoning": "No factors are registered; catalog is empty.",
-  "factor_scores": [],
+  "classification": "high",
+  "final_score": 85.0,
+  "reasoning": "Weighted score 85.0 (>= 75) maps to high.",
+  "factor_scores": {
+    "company_size": { "score": 85, "weight": 1, "reasoning": "About 5,000 staff and a global footprint place this in the large tier." }
+  },
   "dropped_factors": [],
   "retrieved_context": { "result_count": 0, "results": [] },
   "scope_check_outcome": "accept",
@@ -63,6 +65,13 @@ heavy `web_research` payload remains detail-only.
   "created_at": "2026-09-14T10:00:00+00:00"
 }
 ```
+
+`factor_scores` is a map keyed by the registered factor name (identical to the
+triage response, `contracts/inquiry-web.md`); each value carries the stored
+`{score, weight, reasoning}`. Rows created while the catalog was empty store
+`factor_scores: {}`. A `company_size` with score `0` is an honest "no size
+signal" (feature 009) and, being the only registered factor at default weight,
+maps the run to `disqualify`.
 
 > **Changed shape**: `web_research.findings` is the research agent result
 > (`outcome`, `summary`, `sources`, `limitations`, and `uncertain` — the last

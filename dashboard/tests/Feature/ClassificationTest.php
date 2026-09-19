@@ -169,7 +169,7 @@ class ClassificationTest extends TestCase
             ->assertOk()
             ->assertSee('Classification #1')
             ->assertSee('Ada Lovelace')
-            ->assertSee('scope_relevance')
+            ->assertSee('company_size')
             ->assertSee('Matched scope.')
             ->assertSee('System prompt')
             ->assertSee('SERVED SCOPE')
@@ -183,6 +183,21 @@ class ClassificationTest extends TestCase
             ->assertSee('Ada Lovelace on LinkedIn');
     }
 
+    public function test_show_renders_factor_scores_table(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeClassificationResult(UpstreamStubs::classificationDetail(id: 1));
+
+        $this->get(route('classification.show', 1))
+            ->assertOk()
+            ->assertSee('Factor scores')
+            ->assertSee('company_size')
+            ->assertSee('72')
+            ->assertSee('Matched target company size.')
+            ->assertSee('Dropped factors')
+            ->assertSee('None.');
+    }
+
     public function test_show_renders_candidate_filter_audit(): void
     {
         $this->signIn();
@@ -194,6 +209,10 @@ class ClassificationTest extends TestCase
             ->assertSee('3 obtained')
             ->assertSee('2 kept by filter')
             ->assertSee('1 rejected')
+            ->assertSee('Accepted candidates (2)')
+            ->assertSee('Example Corp — About')
+            ->assertSee('https://example.com/about')
+            ->assertSee('Ada Lovelace on LinkedIn')
             ->assertSee('Rejected candidates (1)')
             ->assertSee('10 Best Companies to Work For')
             ->assertSee('https://aggregator.example/list');

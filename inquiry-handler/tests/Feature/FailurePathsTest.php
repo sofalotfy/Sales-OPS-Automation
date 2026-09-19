@@ -8,10 +8,12 @@ use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
 /**
- * Degrade-to-low (FR-007/FR-008, constitution III): every upstream failure must
- * still yield a 200 classification — the empty catalog defaults to `low` with
- * the extracted inquiry preserved in context. Never a fabricated disposition,
- * never a 5xx for a helper failure.
+ * Degrade-to-a-valid-classification (FR-007/FR-008, constitution III): every
+ * upstream failure must still yield a 200 classification with the extracted
+ * inquiry preserved in context. With the `company_size` factor registered
+ * (feature 009) but no research findings present, the factor scores 0 and the
+ * weighted 0.00 maps to `disqualify` (never a fabricated size, never a 5xx for
+ * a helper failure).
  */
 class FailurePathsTest extends TestCase
 {
@@ -41,10 +43,11 @@ class FailurePathsTest extends TestCase
         ]);
     }
 
-    private function assertDegradedLow(\Illuminate\Testing\TestResponse $response, string $message): void
+    private function assertDegraded(\Illuminate\Testing\TestResponse $response, string $message): void
     {
         $response->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
+            ->assertJsonPath('factor_scores.company_size.score', 0)
             ->assertJsonPath('context.inquiry.message', $message);
     }
 
@@ -54,7 +57,7 @@ class FailurePathsTest extends TestCase
 
         $response = $this->triage();
 
-        $this->assertDegradedLow($response, 'Are annual maintenance plans available?');
+        $this->assertDegraded($response, 'Are annual maintenance plans available?');
         $response->assertJsonPath('context.retrieved_context.result_count', 0);
         $response->assertJsonPath('context.retrieved_context.results', []);
 
@@ -66,7 +69,7 @@ class FailurePathsTest extends TestCase
         Stubs::fakeLoginRejected();
         Stubs::fakeRagFailure(401);
 
-        $this->assertDegradedLow($this->triage(), 'Are annual maintenance plans available?');
+        $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
 
     public function test_rag_unavailable_degrades_to_low_with_context_preserved(): void
@@ -77,7 +80,7 @@ class FailurePathsTest extends TestCase
 
         $response = $this->triage();
 
-        $this->assertDegradedLow($response, 'Are annual maintenance plans available?');
+        $this->assertDegraded($response, 'Are annual maintenance plans available?');
         $response->assertJsonPath('context.retrieved_context.result_count', 0);
         $response->assertJsonPath('context.retrieved_context.results', []);
     }
@@ -88,7 +91,7 @@ class FailurePathsTest extends TestCase
         Stubs::fakeRagQuery([Stubs::ragResult()]);
         Stubs::fakeZaiFailure(500);
 
-        $this->assertDegradedLow($this->triage(), 'Are annual maintenance plans available?');
+        $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
 
     public function test_missing_zai_api_key_degrades_to_low_without_calling_provider(): void
@@ -99,7 +102,7 @@ class FailurePathsTest extends TestCase
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
 
-        $this->assertDegradedLow($this->triage(), 'Are annual maintenance plans available?');
+        $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
 
         Http::assertNotSent(fn ($request) => str_contains($request->url(), 'z.ai'));
     }
@@ -122,7 +125,7 @@ class FailurePathsTest extends TestCase
             'email' => 'jane@example.com',
         ]);
 
-        $this->assertDegradedLow($response, $inject);
+        $this->assertDegraded($response, $inject);
         $response->assertJsonMissingPath('disposition');
     }
 
@@ -132,7 +135,7 @@ class FailurePathsTest extends TestCase
         Stubs::fakeRagQuery([Stubs::ragResult()]);
         Stubs::fakeZaiJson('definitely not json');
 
-        $this->assertDegradedLow($this->triage(), 'Are annual maintenance plans available?');
+        $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
 
     public function test_classification_log_write_failure_still_returns_200(): void
@@ -144,7 +147,7 @@ class FailurePathsTest extends TestCase
         // ClassificationResult::create() throws → logged, response still 200.
         \Illuminate\Support\Facades\Schema::drop('classification_results');
 
-        $this->assertDegradedLow($this->triage(), 'Are annual maintenance plans available?');
+        $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
 
     public function test_failure_paths_never_status_500(): void
@@ -154,6 +157,6 @@ class FailurePathsTest extends TestCase
         Stubs::fakeRagFailure(503);
         Stubs::fakeZaiFailure(503);
 
-        $this->assertDegradedLow($this->triage(), 'Are annual maintenance plans available?');
+        $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
 }

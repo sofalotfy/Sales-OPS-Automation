@@ -30,30 +30,38 @@ return [
     'provider' => env('WEB_RESEARCH_PROVIDER'),
 
     // Maximum candidate results the agent considers (across the company and
-    // person sections) before the AI filter runs.
-    'max_candidates' => (int) env('WEB_RESEARCH_MAX_CANDIDATES', 12),
+    // person sections) before the AI filter runs. Effectively everything the
+    // Tavily provider returns (the provider already de-duplicates by URL).
+    'max_candidates' => (int) env('WEB_RESEARCH_MAX_CANDIDATES', 40),
 
     // Maximum kept sources the agent fetches and cites in the summary.
-    'max_sources' => (int) env('WEB_RESEARCH_MAX_SOURCES', 5),
+    'max_sources' => (int) env('WEB_RESEARCH_MAX_SOURCES', 40),
 
-    // Per-page fetch timeout (seconds) and body size cap (bytes).
+    // Per-page fetch timeout (seconds), simultaneous downloads per batch, and
+    // downloaded body size cap (bytes).
     'fetch_timeout' => (int) env('WEB_RESEARCH_FETCH_TIMEOUT', 8),
+    'fetch_concurrency' => (int) env('WEB_RESEARCH_FETCH_CONCURRENCY', 10),
     'fetch_max_bytes' => (int) env('WEB_RESEARCH_FETCH_MAX_BYTES', 200000),
 
     // Maximum extracted characters kept per fetched source page.
     'source_max_chars' => (int) env('WEB_RESEARCH_SOURCE_MAX_CHARS', 8000),
 
-    // Maximum characters of fetched documents sent to the summarize call.
-    'summary_max_input_chars' => (int) env('WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS', 24000),
+    // Maximum characters of documents sent in ONE AI call. Pages that fit
+    // together take a single final-call summary; larger sets are first reduced
+    // to per-page notes by the layer-1 analyst calls.
+    'summary_max_input_chars' => (int) env('WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS', 60000),
 
     // Overall wall-clock budget for one agent run (seconds). Over-budget runs
     // return what was legitimately gathered (partial) or indeterminate.
-    'step_timeout' => (int) env('WEB_RESEARCH_STEP_TIMEOUT', 25),
+    'step_timeout' => (int) env('WEB_RESEARCH_STEP_TIMEOUT', 90),
 
     // AI filter attempts when the model returns unparseable output. The free
     // tier intermittently emits non-JSON; a bounded retry rides through that
     // instead of failing the whole run (falls back to indeterminate).
     'filter_attempts' => (int) env('WEB_RESEARCH_FILTER_ATTEMPTS', 2),
+
+    // Layer-1 (per-page notes) attempts when the model returns unparseable output.
+    'note_attempts' => (int) env('WEB_RESEARCH_NOTE_ATTEMPTS', 2),
 
     // Best-effort rescue: when the AI filter can settle nothing (not_found /
     // ambiguous / empty keep) but candidates still carry the target's name,

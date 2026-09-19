@@ -46,13 +46,15 @@ class FactorSettingsAdminTest extends TestCase
             ->assertJsonPath('detail', 'Not authenticated.');
     }
 
-    public function test_get_returns_empty_factors_on_empty_catalog(): void
+    public function test_get_lists_the_registered_company_size_factor_by_default(): void
     {
         Stubs::authVerifyOk();
 
         $this->getJson('/admin/factor-settings', ['Authorization' => 'Bearer token'])
             ->assertOk()
-            ->assertJsonPath('factors', [])
+            ->assertJsonPath('factors', [
+                ['name' => 'company_size', 'weight' => 1, 'source' => 'default'],
+            ])
             ->assertJsonPath('stored', []);
     }
 

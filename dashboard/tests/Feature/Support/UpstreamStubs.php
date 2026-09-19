@@ -113,7 +113,11 @@ class UpstreamStubs
             'final_score' => $score,
             'reasoning' => $reasoning,
             'factor_scores' => [
-                ['factor' => 'scope_relevance', 'score' => 72, 'weight' => 1.0, 'weighted' => 72.0, 'reasoning' => 'matches'],
+                'company_size' => [
+                    'score' => 72,
+                    'weight' => 1.0,
+                    'reasoning' => 'Matched target company size.',
+                ],
             ],
             'dropped_factors' => [],
             'retrieved_context' => [

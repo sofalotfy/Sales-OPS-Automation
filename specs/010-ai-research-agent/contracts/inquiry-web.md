@@ -20,11 +20,13 @@ Same seven fields and validation as contract 2.2.
 ```json
 {
   "classification": "high",
-  "score": 82.5,
-  "factor_scores": { "scope_relevance": { "score": 88, "weight": 0.5, "reasoning": "..." } },
+  "score": 85.0,
+  "factor_scores": {
+    "company_size": { "score": 85, "weight": 1, "reasoning": "About 5,000 staff and a global footprint place this in the large tier." }
+  },
   "dropped_factors": [],
   "reply": "You are in the right place. Pick a time here: https://app.example.com/book",
-  "reasoning": "Weighted score 82.5 (>= 75) maps to high.",
+  "reasoning": "Weighted score 85.0 (>= 75) maps to high.",
   "context": {
     "inquiry": { "first_name": "Jane", "last_name": "Doe", "email": "jane@example.com",
                  "phone_number": "+1 555 0132", "company_name": "Example Corp",
@@ -49,6 +51,17 @@ Same seven fields and validation as contract 2.2.
   }
 }
 ```
+
+`factor_scores` lists every code-registered factor that produced a verdict. As of
+this contract the single registered factor is `company_size` (feature
+[009-company-size-factor](../../009-company-size-factor/spec.md)): an AI-call
+score over the web-research findings, anchored as a 0–100 number with an honest
+reasoning string. A score of `0` is a truthful "no size signal" (blank/missing
+company name, `not_found`/`ambiguous` findings, unavailable research, AI failure,
+or out-of-range AI output) — never a fabricated estimate. Because `company_size`
+carries the default weight `1`, weighted `0.00` maps below the `low` band (30) and
+classifies as `disqualify`; consumers must not treat a zero score as an active
+disqualification by the factor itself.
 
 ### Changed field: `context.web_research.findings`
 

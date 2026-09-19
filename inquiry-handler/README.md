@@ -133,7 +133,14 @@ All knobs are env-driven (see `.env.example`):
 | `ZAI_MODEL`                    | Default (scope/general) Z.AI model id (default `glm-4.5-flash`). |
 | `ZAI_RESEARCH_MODEL`           | Model id for the AI research agent's filter + summarize steps (default `glm-4.7-flash`). |
 | `ZAI_TIMEOUT`                  | Per-request AI HTTP timeout in seconds (default 90; free-tier flash models are slow). |
-| `WEB_RESEARCH_FILTER_ATTEMPTS` | AI filter retries on unparseable output (default 2). |
+| `WEB_RESEARCH_MAX_CANDIDATES`   | Candidate results the agent considers before the AI filter (default 40, i.e. everything the provider returns). |
+| `WEB_RESEARCH_MAX_SOURCES`      | Kept sources the agent fetches and cites (default 40). |
+| `WEB_RESEARCH_FETCH_TIMEOUT`    | Per-page fetch timeout in seconds (default 8).        |
+| `WEB_RESEARCH_FETCH_CONCURRENCY`| Simultaneous page downloads per batch (default 10).   |
+| `WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS` | Documents fit in a single AI call below this; larger sets go through layer-1 per-page notes (default 60000). |
+| `WEB_RESEARCH_STEP_TIMEOUT`     | Wall-clock budget for one research agent run (default 90). |
+| `WEB_RESEARCH_FILTER_ATTEMPTS`  | AI filter retries on unparseable output (default 2). |
+| `WEB_RESEARCH_NOTE_ATTEMPTS`    | Layer-1 per-page notes retries on unparseable output (default 2). |
 | `WEB_RESEARCH_RESCUE_ON_NAME_MATCH` | Best-effort rescue for scarce data: fetch + summarize name-matching candidates and mark the result `uncertain` (default `true`). |
 | `COMPANY_SCOPE`                | Company/scope statement injected into the fixed system prompt (persisted per inquiry as `system_prompt`). |
 | `BOOKING_URL`                  | Booking link substituted into the `high` reply only when it is a valid URL. |

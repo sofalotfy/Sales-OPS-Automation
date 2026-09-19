@@ -19,14 +19,18 @@ Returns the effective weight of every **registered** factor and the raw stored m
 ```json
 {
   "factors": [
-    { "name": "scope_relevance", "weight": 0.5, "source": "stored" }
+    { "name": "company_size", "weight": 1, "source": "default" }
   ],
-  "stored": { "scope_relevance": 0.5 }
+  "stored": {}
 }
 ```
 
 - `stored` — the persisted weights map (factor-settings row). Empty object if none stored.
 - `factors` — one entry per code-registered factor. `weight` is `stored[name] ?? config('scoring.default_factor_weight')`; `source` is `"stored"` or `"default"`.
+
+As of this revision the code-registered catalog is a single factor,
+`company_size` (feature [009-company-size-factor](../../009-company-size-factor/spec.md)),
+so GET always lists that one name and cannot return an empty catalog.
 
 ### Errors
 
@@ -42,7 +46,7 @@ Replaces the stored weights for registered factors.
 
 ```json
 {
-  "weights": { "scope_relevance": 0.55, "urgency": 0.2 }
+  "weights": { "company_size": 1.5 }
 }
 ```
 
@@ -51,8 +55,7 @@ Replaces the stored weights for registered factors.
 ```json
 {
   "factors": [
-    { "name": "scope_relevance", "weight": 0.55, "source": "stored" },
-    { "name": "urgency", "weight": 0.2, "source": "stored" }
+    { "name": "company_size", "weight": 1.5, "source": "stored" }
   ]
 }
 ```
@@ -71,5 +74,5 @@ The updated `factors` array (same shape as GET) confirms the new effective weigh
 | Status | Body `detail` | Trigger |
 |--------|---------------|---------|
 | `401` | `Not authenticated.` | missing/invalid/revoked bearer token |
-| `422` | e.g. `Unknown factor: budget_signal`, `Weights are required.`, `Weight for scope_relevance must be a number >= 0.` | shape/validation violation |
+| `422` | e.g. `Unknown factor: budget_signal`, `Weights are required.`, `Weight for company_size must be a number >= 0.` | shape/validation violation |
 | `503` | `Settings store unavailable.` | weights store unreadable/unwritable when persisting |

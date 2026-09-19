@@ -55,11 +55,11 @@ class ScopeGateTest extends TestCase
         ]);
 
         $response->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('score', 0)
-            ->assertJsonPath('factor_scores', [])
+            ->assertJsonPath('factor_scores.company_size.score', 0)
             ->assertJsonPath('dropped_factors', [])
-            ->assertJsonPath('reply', config('scoring.replies.low'))
+            ->assertJsonPath('reply', config('scoring.replies.disqualify'))
             ->assertJsonPath('context.scope_check.outcome', 'accept')
             ->assertJsonPath('context.scope_check.reason', "The inquiry is within the company's served scope.")
             ->assertJsonPath('context.inquiry.first_name', 'Jane')
@@ -76,7 +76,7 @@ class ScopeGateTest extends TestCase
             'phone_number' => '+1 555 0132',
             'company_name' => 'Example Corp',
             'country_region' => 'United Kingdom',
-            'classification' => 'low',
+            'classification' => 'disqualify',
             'scope_check_outcome' => 'accept',
             'scope_check_reason' => "The inquiry is within the company's served scope.",
             'refusal' => null,
@@ -163,7 +163,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.scope_check.outcome', 'accept');
     }
 
@@ -175,7 +175,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.scope_check.outcome', 'accept');
     }
 
@@ -187,7 +187,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.scope_check.outcome', 'indeterminate');
     }
 
@@ -200,7 +200,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.scope_check.outcome', 'indeterminate');
     }
 
@@ -212,7 +212,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.scope_check.outcome', 'indeterminate');
     }
 
@@ -224,7 +224,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.scope_check.outcome', 'indeterminate');
     }
 
@@ -264,7 +264,7 @@ class ScopeGateTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Fix my washing machine.'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonMissingPath('context.scope_check');
     }
 

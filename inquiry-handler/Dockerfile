@@ -32,4 +32,7 @@ ENV APP_ENV=production
 EXPOSE 8003
 
 ENTRYPOINT ["inquiry-handler-entrypoint"]
-CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8003"]
+# --no-reload: without it Laravel's ServeCommand silently degrades to a single
+# worker even when PHP_CLI_SERVER_WORKERS>1. We need the fork pool so a slow
+# web-research triage cannot block health/admin/dashboard traffic.
+CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8003", "--no-reload"]

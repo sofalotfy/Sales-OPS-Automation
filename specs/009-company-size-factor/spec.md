@@ -13,9 +13,11 @@
 ## Context
 
 The triage engine (006) scores an inquiry by combining pluggable, weighted
-factors — but the factor catalog is currently **empty**, so every run degrades
-to `score 0.00 / low` (see `006-weighted-factor-classification`). This is the
-**first factor** to populate that catalog (FR-004 "add a factor").
+factors. Before this feature the factor catalog was **empty**, so every run
+degraded to `score 0.00 / low` (see `006-weighted-factor-classification`). This
+is the **first factor** to populate that catalog (FR-004 "add a factor"): it is
+registered and its weighted score drives classification (0 → `disqualify` when
+it is the only factor and finds no size signal).
 
 A "how big is the company" factor is the natural first signal for sales
 triage: an inquiry from a large, well-known enterprise is typically more
@@ -178,11 +180,15 @@ request the factor ever makes.
   store (per the existing factor-settings flow) and contribute to the weighted
   mean exactly like every other registered factor; unknown/missing weight falls
   back to the default (matching the existing behavior).
-- **FR-007**: [NEEDS CLARIFICATION: which public-data source should be used to
-  estimate company size — a dedicated company-data API, web search over public
-  pages, or the existing RAG retrieval service? The feature text says "public
-  data from the internet" but does not specify a provider. This materially
-  affects FR-002/FR-005.]
+- **FR-007**: RESOLVED (2026-09-19, implementation). The public data source is
+  the **AI research agent's findings** (feature 010): the factor runs an AI call
+  whose input is the inquirer's `company_name` (and optional `country_region`)
+  plus the grounded `web_research.findings` (summary + fetched source URLs) from
+  the completed research pass. No separate company-data/CRM API is consulted. The
+  AI returns a strict JSON `{score: 0-100, size_band, employee_count, reasoning}`
+  that the factor parses; unparseable/out-of-range/failed output degrades to
+  score `0` with an honest reasoning note (FR-003). Contact fields are never sent
+  (SC-003).
 
 ### Key Entities
 
@@ -197,10 +203,10 @@ request the factor ever makes.
 
 ## Assumptions
 
-- **ASS-01**: "Public data" means publicly available company information on the
-  internet (web-accessible public pages/signals); the specific data source is
-  unresolved (see FR-007) and is deferred to the plan/research phase with a
-  stub, per the constitution's "provisional scope" principle.
+- **ASS-01**: "Public data" means the **AI research agent's findings** (feature
+  010) — the grounded summary and fetched source URLs produced by the research
+  pass over public web pages. Resolved in the implementation (see FR-007);
+  no separate provider is needed.
 - **ASS-02**: A company is considered "found" only when public data yields a
   stable, non-ambiguous size signal; anything else (blank name, not indexed,
   ambiguous) → score `0`.

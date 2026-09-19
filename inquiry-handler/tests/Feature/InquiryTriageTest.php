@@ -9,16 +9,19 @@ use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
 /**
- * New empty-catalog contract (contracts/inquiry-web.md v2.0): with no factors
- * registered the endpoint returns `low` / 0.00 plus the response envelope
- * (classification/score/factor_scores/dropped_factors/reply/reasoning/context).
- * No `disposition` key is emitted.
+ * Base triage contract with the factor catalog populated (feature 009): the
+ * `company_size` factor is the first and only registered factor, so the engine
+ * no longer degrades to the empty catalog. Without web-research findings the
+ * factor scores 0 and the weighted 0.00 maps to `disqualify` (contracts/
+ * inquiry-web.md); the response envelope
+ * (classification/score/factor_scores/dropped_factors/reply/reasoning/context)
+ * is otherwise unchanged.
  */
 class InquiryTriageTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_empty_catalog_returns_low_with_contact_fields_echoed(): void
+    public function test_company_size_scores_zero_without_findings_and_is_first_factor(): void
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
@@ -34,11 +37,13 @@ class InquiryTriageTest extends TestCase
         ]);
 
         $response->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('score', 0)
-            ->assertJsonPath('factor_scores', [])
+            ->assertJsonPath('factor_scores.company_size.score', 0)
+            ->assertJsonPath('factor_scores.company_size.weight', 1)
+            ->assertJsonPath('factor_scores.company_size.reasoning', 'Company size could not be estimated: no web-research findings were available.')
             ->assertJsonPath('dropped_factors', [])
-            ->assertJsonPath('reasoning', 'No factors are registered; catalog is empty.')
+            ->assertJsonPath('reasoning', 'Weighted score 0.00 maps to disqualify.')
             ->assertJsonMissingPath('disposition')
             ->assertJsonPath('context.inquiry.first_name', 'Jane')
             ->assertJsonPath('context.inquiry.last_name', 'Doe')
@@ -52,7 +57,7 @@ class InquiryTriageTest extends TestCase
             ->assertJsonPath('context.system_prompt', (new \App\Triage\SystemPrompt)->content());
     }
 
-    public function test_low_reply_is_the_configured_placeholder(): void
+    public function test_missing_company_name_maps_to_disqualify_reply(): void
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
@@ -65,8 +70,9 @@ class InquiryTriageTest extends TestCase
         ]);
 
         $response->assertOk()
-            ->assertJsonPath('reply', config('scoring.replies.low'))
-            ->assertJsonPath('classification', 'low');
+            ->assertJsonPath('reply', config('scoring.replies.disqualify'))
+            ->assertJsonPath('classification', 'disqualify')
+            ->assertJsonPath('factor_scores.company_size.score', 0);
     }
 
     public function test_required_contact_fields_only_submission_works(): void
@@ -82,7 +88,9 @@ class InquiryTriageTest extends TestCase
         ]);
 
         $response->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
+            ->assertJsonPath('factor_scores.company_size.score', 0)
+            ->assertJsonPath('factor_scores.company_size.reasoning', 'Company size could not be estimated: no company name was provided.')
             ->assertJsonPath('context.inquiry.first_name', 'Jane')
             ->assertJsonPath('context.inquiry.last_name', 'Doe')
             ->assertJsonPath('context.inquiry.email', 'jane@example.com')
@@ -128,7 +136,7 @@ class InquiryTriageTest extends TestCase
             'phone_number' => null,
             'company_name' => null,
             'country_region' => null,
-            'classification' => 'low',
+            'classification' => 'disqualify',
             'final_score' => 0,
         ]);
         $this->assertSame(1, ClassificationResult::query()->count());
@@ -138,7 +146,7 @@ class InquiryTriageTest extends TestCase
         );
     }
 
-    public function test_empty_catalog_never_calls_the_ai_provider(): void
+    public function test_inquiry_without_research_never_calls_the_ai_provider(): void
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
@@ -151,7 +159,7 @@ class InquiryTriageTest extends TestCase
             'email' => 'jane@example.com',
         ])
             ->assertOk()
-            ->assertJsonPath('classification', 'low');
+            ->assertJsonPath('classification', 'disqualify');
 
         Http::assertNotSent(fn ($request) => str_contains($request->url(), 'z.ai'));
     }

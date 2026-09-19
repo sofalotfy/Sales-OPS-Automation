@@ -47,9 +47,15 @@ class ResearchAgentTest extends TestCase
         {
             public function __construct(private array $pages) {}
 
-            public function fetch(string $url): ?array
+            public function fetchMany(array $urls, ?float $deadline = null): array
             {
-                return $this->pages[$url] ?? null;
+                $documents = [];
+
+                foreach ($urls as $url) {
+                    $documents[$url] = $this->pages[$url] ?? null;
+                }
+
+                return $documents;
             }
         };
     }

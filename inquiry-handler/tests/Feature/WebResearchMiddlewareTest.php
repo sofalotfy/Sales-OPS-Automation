@@ -8,6 +8,8 @@ use App\WebResearch\ResearchOutcome;
 use App\WebResearch\ResearchResult;
 use App\WebResearch\WebResearchProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Http;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -92,6 +94,9 @@ class WebResearchMiddlewareTest extends TestCase
         ));
 
         $this->fakeClassificationUpstreams();
+        // The company-size factor (feature 009) consumes the completed findings
+        // with an AI call; make it deterministic for this run.
+        Stubs::fakeZaiFactorScore(0, 'The research findings gave no company-size signal.');
 
         $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
 
@@ -102,6 +107,7 @@ class WebResearchMiddlewareTest extends TestCase
             ->assertJsonPath('context.web_research.findings.sources.0.url', 'https://example.com/about')
             ->assertJsonPath('context.web_research.criteria.company.name', 'Example Corp')
             ->assertJsonPath('context.web_research.criteria.person.first_name', 'Jane')
+            ->assertJsonPath('factor_scores.company_size.score', 0)
             // The candidate audit is an operational detail: persisted for the
             // dashboard, but not part of the public triage response.
             ->assertJsonMissingPath('context.web_research.audit')
@@ -116,6 +122,56 @@ class WebResearchMiddlewareTest extends TestCase
         $this->assertSame(1, $row->web_research['audit']['counts']['rejected']);
         $this->assertSame('Example Corp Ltd - Aggregator', $row->web_research['audit']['rejected'][0]['title']);
         $this->assertArrayNotHasKey('company', $row->web_research['findings']);
+        $this->assertSame(0, $row->factor_scores['company_size']['score']);
+    }
+
+    // ---------------------------------------------- company-size classification
+
+    public function test_company_size_factor_classifies_from_research_findings(): void
+    {
+        $this->bindProvider(fn (array $criteria) => [
+            'company' => ['results' => [['title' => 'Example Corp', 'url' => 'https://example.com/about', 'snippet' => 'Fintech with 5,000 employees']]],
+            'person' => ['results' => []],
+        ]);
+        $this->bindAgent(new ResearchResult(
+            ResearchOutcome::Completed,
+            'Example Corp is a large UK enterprise with around 5,000 employees.',
+            [['title' => 'About Example Corp', 'url' => 'https://example.com/about']],
+            null,
+            audit: [],
+        ));
+
+        $this->fakeClassificationUpstreams();
+        Stubs::fakeZaiFactorScore(85, 'About 5,000 staff and a global footprint place this in the large tier.', 'large', 5000);
+
+        $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
+
+        $response->assertOk()
+            ->assertJsonPath('classification', 'high')
+            ->assertJsonPath('score', 85)
+            ->assertJsonPath('factor_scores.company_size.score', 85)
+            ->assertJsonPath('factor_scores.company_size.weight', 1)
+            ->assertJsonPath('factor_scores.company_size.reasoning', 'About 5,000 staff and a global footprint place this in the large tier.')
+            ->assertJsonPath('dropped_factors', []);
+
+        // The AI cue carries the public company context and findings only —
+        // never the contact fields (SC-003).
+        Http::assertSent(function (Request $request) {
+            $payload = (string) json_encode($request->data());
+
+            $this->assertStringContainsString('Example Corp', $payload);
+            $this->assertStringContainsString('5,000 employees', $payload);
+
+            foreach (['jane@example.com', '+1 555 0132', '"Jane"', '"Doe"', 'first_name', 'last_name', 'phone_number'] as $leak) {
+                $this->assertStringNotContainsString($leak, $payload, 'AI payload leaked a contact field.');
+            }
+
+            return true;
+        });
+
+        $row = ClassificationResult::orderByDesc('id')->first();
+        $this->assertSame(85, $row->factor_scores['company_size']['score']);
+        $this->assertSame('high', $row->classification->value);
     }
 
     // ---------------------------------------------------------------- decline
@@ -167,7 +223,9 @@ class WebResearchMiddlewareTest extends TestCase
             ->assertOk()
             ->assertJsonPath('context.web_research.outcome', 'accept')
             ->assertJsonPath('context.web_research.findings.outcome', 'not_found')
-            ->assertJsonPath('context.web_research.findings.summary', 'No public information about Example Corp / Jane Doe could be found to establish a profile.');
+            ->assertJsonPath('context.web_research.findings.summary', 'No public information about Example Corp / Jane Doe could be found to establish a profile.')
+            ->assertJsonPath('factor_scores.company_size.score', 0)
+            ->assertJsonPath('factor_scores.company_size.reasoning', 'Company size could not be estimated: no public information about the company was found.');
     }
 
     public function test_ambiguous_is_an_accept_with_an_explicit_statement(): void
@@ -182,7 +240,8 @@ class WebResearchMiddlewareTest extends TestCase
         $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'))
             ->assertOk()
             ->assertJsonPath('context.web_research.outcome', 'accept')
-            ->assertJsonPath('context.web_research.findings.outcome', 'ambiguous');
+            ->assertJsonPath('context.web_research.findings.outcome', 'ambiguous')
+            ->assertJsonPath('factor_scores.company_size.score', 0);
     }
 
     // ----------------------------------------------------------- indeterminate
@@ -196,7 +255,7 @@ class WebResearchMiddlewareTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.web_research.outcome', 'indeterminate')
             ->assertJsonPath('context.web_research.findings', []);
 
@@ -216,7 +275,7 @@ class WebResearchMiddlewareTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.web_research.outcome', 'indeterminate')
             ->assertJsonPath('context.web_research.findings', []);
 
@@ -234,7 +293,7 @@ class WebResearchMiddlewareTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonPath('context.web_research.outcome', 'indeterminate')
             ->assertJsonPath('context.web_research.findings', []);
     }
@@ -270,7 +329,7 @@ class WebResearchMiddlewareTest extends TestCase
 
         $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'))
             ->assertOk()
-            ->assertJsonPath('classification', 'low')
+            ->assertJsonPath('classification', 'disqualify')
             ->assertJsonMissingPath('context.web_research');
 
         $row = ClassificationResult::orderByDesc('id')->first();

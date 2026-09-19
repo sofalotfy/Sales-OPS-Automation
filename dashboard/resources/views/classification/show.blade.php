@@ -51,20 +51,21 @@
                             <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-400">
                                 <th scope="col" class="py-2 pr-2">Factor</th>
                                 <th scope="col" class="py-2 pr-2">Score</th>
-                                <th scope="col" class="py-2 text-right">Weighted</th>
+                                <th scope="col" class="py-2 pr-2">Weight</th>
+                                <th scope="col" class="py-2 text-left">Reasoning</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100">
-                            @foreach ($record['factor_scores'] as $factorScore)
+                            @foreach ($record['factor_scores'] as $factorName => $factorScore)
                                 <tr>
-                                    <td class="py-2 pr-2 text-slate-700">{{ $factorScore['factor'] }}</td>
+                                    <td class="py-2 pr-2 text-slate-700">{{ $factorName }}</td>
                                     <td class="py-2 pr-2 text-slate-600">{{ $factorScore['score'] }}</td>
-                                    <td class="py-2 text-right text-slate-600">{{ $factorScore['weighted'] }}</td>
+                                    <td class="py-2 pr-2 text-slate-600">{{ $factorScore['weight'] ?? '' }}</td>
+                                    <td class="py-2 text-slate-600">{{ $factorScore['reasoning'] ?? '' }}</td>
                                 </tr>
                             @endforeach
                         </tbody>
                     </table>
-                    <p class="mt-2 text-xs text-slate-400">Weight {{ $factorScore['weight'] ?? '' }}</p>
                 @endif
 
                 <h2 class="mt-6 text-base font-semibold text-slate-900">Dropped factors</h2>
@@ -238,6 +239,23 @@
                             {{ $counts['rejected'] ?? 0 }} rejected
                             @if (! empty($audit['rescue_used']))<span class="ml-1 text-xs font-medium text-amber-600">· name-match rescue used</span>@endif
                         </p>
+                        @php($kept = is_array($audit['kept'] ?? null) ? $audit['kept'] : [])
+                        @if ($kept !== [])
+                            <p class="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">Accepted candidates ({{ count($kept) }})</p>
+                            <ul class="mt-1 space-y-1">
+                                @foreach ($kept as $keptItem)
+                                    @php($keptTitle = is_array($keptItem) ? trim((string) ($keptItem['title'] ?? '')) : '')
+                                    @php($keptUrl = is_array($keptItem) ? (string) ($keptItem['url'] ?? '') : '')
+                                    <li class="text-sm">
+                                        @if ($keptUrl !== '')
+                                            <a href="{{ $keptUrl }}" target="_blank" rel="noopener noreferrer" class="text-slate-700 hover:text-slate-900">{{ $keptTitle !== '' ? $keptTitle : $keptUrl }}</a>
+                                        @else
+                                            <span class="text-slate-700">{{ $keptTitle }}</span>
+                                        @endif
+                                    </li>
+                                @endforeach
+                            </ul>
+                        @endif
                         @php($rejected = is_array($audit['rejected'] ?? null) ? $audit['rejected'] : [])
                         @if ($rejected !== [])
                             <p class="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">Rejected candidates ({{ count($rejected) }})</p>

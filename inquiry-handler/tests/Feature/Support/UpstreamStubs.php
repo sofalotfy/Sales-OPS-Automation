@@ -157,6 +157,29 @@ class UpstreamStubs
         ]);
     }
 
+    /** Company-size factor (feature 009): the AI size estimate parsed back. */
+    public static function fakeZaiFactorScore(
+        int $score,
+        ?string $reasoning = null,
+        ?string $sizeBand = null,
+        ?int $employeeCount = null,
+    ): void {
+        $reasoning ??= $score === 0
+            ? 'The research findings contain no reliable company-size signal.'
+            : 'Estimated from the public research findings.';
+
+        Http::fake([
+            self::zaiUrl() => Http::response([
+                'choices' => [['message' => ['content' => json_encode([
+                    'score' => $score,
+                    'size_band' => $sizeBand,
+                    'employee_count' => $employeeCount,
+                    'reasoning' => $reasoning,
+                ])]]],
+            ], 200),
+        ]);
+    }
+
     /** Scope gate (feature 007): the AI judges the inquiry in scope. */
     public static function fakeScopeAccept(string $reason = 'Within the served scope.'): void
     {

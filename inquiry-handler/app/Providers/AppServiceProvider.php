@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Scoring\CompanySizeFactor;
 use App\Scoring\FactorRegistry;
 use App\WebResearch\Providers\TavilyResearchProvider;
 use App\WebResearch\WebResearchProvider;
@@ -20,11 +21,18 @@ class AppServiceProvider extends ServiceProvider
         // env COMPANY_SCOPE). Registered here so auto-wiring resolves it.
         $this->app->bind(PromptBuilder::class, fn ($app) => new PromptBuilder((string) config('services.company_scope')));
 
-        // Factor catalog is code-registered (FR-004): starts empty, factors are
-        // added one at a time in development by defining a ScoreFactor service
-        // and call add() here (SC-003). Kept as a singleton so the same list is
-        // shared by the triage flow and the admin factor-settings API.
-        $this->app->singleton(FactorRegistry::class, fn () => new FactorRegistry());
+        // Factor catalog is code-registered (FR-004): factors are added one at
+        // a time in development by defining a ScoreFactor service and calling
+        // add() here (SC-003). `company_size` is the first registered factor
+        // (feature 009) and therefore leads the factor breakdown. Kept as a
+        // singleton so the same list is shared by the triage flow and the
+        // admin factor-settings API.
+        $this->app->singleton(FactorRegistry::class, function ($app) {
+            $registry = new FactorRegistry;
+            $registry->add($app->make(CompanySizeFactor::class));
+
+            return $registry;
+        });
 
         // Web-research provider plug point: defaults to the real Tavily-backed
         // implementation; point config('web_research.provider') (env
