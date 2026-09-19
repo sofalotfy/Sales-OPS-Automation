@@ -23,3 +23,8 @@ Thumbs.db
 
 # Spec Kit machine-local state
 .specify/feature.json
+# opencode tooling - local-only
+.opencode/
+
+# speckit-generated specs - local-only
+specs/
