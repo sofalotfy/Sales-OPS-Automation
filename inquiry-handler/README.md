@@ -22,7 +22,8 @@ at `GET /` for manual/exercise testing only — it is not a product surface. See
    carried along but **never sent to the AI**.
 3. RAG context retrieval is no longer used: the only context each inquiry is
    judged against is the fixed classification system prompt
-   (`App\Triage\SystemPrompt`, built from `COMPANY_SCOPE`). The same string is
+   (`App\Triage\SystemPrompt`, with the scope hardcoded in
+   `config/services.php`). The same string is
    persisted verbatim on the record (`system_prompt`) so admins can audit it.
 4. `ScoringEngine` iterates the code-registered `FactorRegistry`. Each factor
    service computes a 0–100 score (factors may use `AiCallingService::complete()`
@@ -147,7 +148,7 @@ All knobs are env-driven (see `.env.example`):
 | `WEB_RESEARCH_NOTE_ATTEMPTS`    | Layer-1 per-page notes retries on unparseable output (default 2). |
 | `WEB_RESEARCH_NOTE_MAX_OUTPUT_TOKENS` | Layer-1 notes output cap and per-note text bound (default 1024; keeps input + output of every notes call inside the 8K token/min window while notes EXTRACT the pages' detail verbatim). |
 | `WEB_RESEARCH_RESCUE_ON_NAME_MATCH` | Best-effort rescue for scarce data: fetch + summarize name-matching candidates and mark the result `uncertain` (default `true`). |
-| `COMPANY_SCOPE`                | Company/scope statement injected into the fixed system prompt (persisted per inquiry as `system_prompt`). |
+| `COMPANY_SCOPE`                | Removed — scope is now hardcoded in `config/services.php` (`company_scope`). |
 | `BOOKING_URL`                  | Booking link substituted into the `high` reply only when it is a valid URL. |
 | `MESSAGE_MAX_LENGTH`           | Max message length (default 4000).                   |
 | `RAG_TOP_K`                    | Unused since context retrieval is disabled (kept for future use; default 5). |

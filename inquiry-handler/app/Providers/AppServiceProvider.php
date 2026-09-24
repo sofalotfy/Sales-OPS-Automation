@@ -16,9 +16,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        // PromptBuilder keeps the system prompt fixed; the deployment-specific
-        // company-scope statement is the only injected part (config/services.php,
-        // env COMPANY_SCOPE). Registered here so auto-wiring resolves it.
+        // PromptBuilder keeps the system prompt fixed; the company-scope
+        // statement is the only injected part (hardcoded in config/services.php).
+        // Registered here so auto-wiring resolves it.
         $this->app->bind(PromptBuilder::class, fn ($app) => new PromptBuilder((string) config('services.company_scope')));
 
         // Factor catalog is code-registered (FR-004): factors are added one at

@@ -18,14 +18,29 @@ return [
     'auth_api_url' => env('AUTH_API_URL', 'http://auth-service:8001'),
     'rag_api_url' => env('RAG_API_URL', 'http://work-scope-rag:8000'),
 
-    // Deployment-specific company/scope statement injected into the system
-    // prompt. A fixed string per deployment (env), never request-influenced;
-    // keeps the triage persona aligned with the retrieval corpus.
-    'company_scope' => env(
-        'COMPANY_SCOPE',
-        'a B2B software-automation consultancy that builds enterprise web applications, '
-            .'automation workflows, and sales/CRM tooling for B2B software companies',
-    ),
+    // Fixed company/scope statement injected into the system prompt. Hardcoded
+    // (never request-influenced); keeps the triage persona aligned with the
+    // retrieval corpus.
+    'company_scope' => implode("\n", [
+        'Robusta Studio is RTG\'s delivery engine for customer experience, commerce, and enterprise digital transformation — its scope spans eight service lines from strategy and product discovery through engineering, e-commerce, AI, data, cloud, and cybersecurity.',
+        '',
+        'Service lines (Robusta Studio):',
+        '- Digital Transformation & Strategy — product discovery & agile advisory, workflow automation, system integration, process digitization',
+        '- E-Commerce — end-to-end commerce ecosystems, B2C/B2B/marketplace models, order management & fulfillment, storefront-to-analytics coverage',
+        '- Shopify Services — design-first storefront delivery, custom features without a full backend build, post-launch support',
+        '- Engineering & Experience — mobile & web apps, UX/UI design systems, prototyping & user testing, accessible interfaces',
+        '- Artificial Intelligence — personalization, smart search & NLP, AI assistants & automation, GenAI integration',
+        '- Data & Analytics — predictive modeling, data lakes & warehouses, BI dashboards, pipeline architecture',
+        '- Cloud & Infrastructure — multi-cloud architecture, CI/CD, Infrastructure-as-Code, cost optimization',
+        '- Cybersecurity & Compliance — secure SDLC & code review, penetration testing, virtual CISO, compliance readiness',
+        '',
+        'Delivery methodology — five stages: Discover → Define → Build → Launch → Grow.',
+        'Platforms & partners — Adobe Commerce for enterprise-grade custom commerce, Shopify for rapid-growth storefronts; partners include Adobe, AWS, Microsoft, Paymob, Shopify, Laravel, Hypernode, Stonebranch.',
+        'Industries — retail & e-commerce, proptech, govtech, fintech, healthcare, logistics, edtech, telecom.',
+        'Scale — 200+ experts, 500+ projects delivered, 250+ clients, 10+ industries. Older third-party profiles still list "100+ consultants" and two hubs (Egypt and Germany), so treat those as outdated.',
+        'Group context — Studio is one of RTG\'s four business units, alongside Octopus (tech talent, outsourcing, EOR, digital hubs), Ventures (venture building), and Products (proprietary SaaS/AI: ORDR, NAWRIX, SENTRA). At group level the scope adds two extra lines beyond Studio\'s: e-commerce venture building and tech team building.',
+        'Representative engagements — Fit & Fix, Vodafone Ta3limy, Seoudi, Mondelez (Talabya B2B distribution), Mazaya, Spinneys loyalty, Saudi Tourism Authority (Dalila), Al Othaim (Speedi), Raya Shop.',
+    ]),
 
     'ai' => [
         'key' => env('AI_API_KEY'),
