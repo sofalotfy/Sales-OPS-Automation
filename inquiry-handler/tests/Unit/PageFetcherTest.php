@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\WebResearch\PageFetcher;
+use App\WebResearch\UrlGuard;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -17,7 +18,9 @@ class PageFetcherTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->fetcher = new PageFetcher();
+        $this->fetcher = new PageFetcher(
+            new UrlGuard(fn (string $host): array => ['93.184.216.34'])
+        );
         config()->set('web_research.fetch_timeout', 8);
         config()->set('web_research.fetch_max_bytes', 200000);
         config()->set('web_research.source_max_chars', 8000);

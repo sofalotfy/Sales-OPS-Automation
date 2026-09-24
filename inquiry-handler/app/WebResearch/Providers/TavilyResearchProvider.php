@@ -3,8 +3,7 @@
 namespace App\WebResearch\Providers;
 
 use App\WebResearch\WebResearchProvider;
-use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 
@@ -127,7 +126,10 @@ class TavilyResearchProvider implements WebResearchProvider
     }
 
     /**
-     * Run every question and merge the results, dropping URLs already seen.
+     * Run every question CONCURRENTLY (Http::pool) and merge the results,
+     * dropping URLs already seen. All 8 topic queries go out at once instead
+     * of one after another, so the whole search takes roughly as long as the
+     * single slowest query rather than the sum of all of them.
      *
      * @param array<int, array{topic: string, query: string, max_results: int}> $questions
      *
@@ -156,13 +158,42 @@ class TavilyResearchProvider implements WebResearchProvider
             ];
         }
 
+        $url = (string) config('services.tavily.url', 'https://api.tavily.com/search');
+        $depth = (string) config('services.tavily.search_depth', 'basic');
+        $timeout = max(1, (int) config('services.tavily.timeout', 15));
+
+        try {
+            $responses = Http::pool(fn (Pool $pool) => array_map(
+                fn (array $question) => $pool
+                    ->as($question['topic'])
+                    ->acceptJson()
+                    ->asJson()
+                    ->timeout($timeout)
+                    ->post($url, [
+                        'api_key' => $key,
+                        'query' => $question['query'],
+                        'search_depth' => $depth,
+                        'max_results' => max(1, min(10, $question['max_results'])),
+                        'include_answer' => false,
+                    ]),
+                $questions,
+            ));
+        } catch (\Throwable) {
+            // The whole pool failed to even dispatch (rare). Fail open with no results
+            // rather than throwing, matching every other failure path in this class.
+            $responses = [];
+        }
+
         $allResults = [];
         $seen = [];
 
         foreach ($questions as $question) {
-            try {
-                $response = $this->call($key, $question['query'], $question['max_results']);
-            } catch (ConnectionException | RequestException) {
+            $response = $responses[$question['topic']] ?? null;
+
+            // A pool entry can come back as a Response, or as a ConnectionException /
+            // RequestException object when that individual request failed — never
+            // an exception thrown here. Skip anything that isn't a usable Response.
+            if (! $response instanceof Response || ! $response->successful()) {
                 continue;
             }
 
@@ -190,34 +221,6 @@ class TavilyResearchProvider implements WebResearchProvider
             'found' => $allResults !== [],
             'results' => $allResults,
         ];
-    }
-
-    /**
-     * @throws ConnectionException
-     * @throws RequestException
-     */
-    private function call(string $key, string $query, int $maxResults): Response
-    {
-        return Http::acceptJson()
-            ->asJson()
-            ->timeout(15)
-            ->post(
-                (string) config(
-                    'services.tavily.url',
-                    'https://api.tavily.com/search'
-                ),
-                [
-                    'api_key' => $key,
-                    'query' => $query,
-                    'search_depth' => (string) config(
-                        'services.tavily.search_depth',
-                        'basic'
-                    ),
-                    'max_results' => max(1, min(10, $maxResults)),
-                    'include_answer' => false,
-                ]
-            )
-            ->throw();
     }
 
     /**

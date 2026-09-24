@@ -29,6 +29,13 @@ use Throwable;
  */
 class PageFetcher
 {
+    private readonly UrlGuard $guard;
+
+    public function __construct(?UrlGuard $guard = null)
+    {
+        $this->guard = $guard ?? new UrlGuard();
+    }
+
     /**
      * Fetch a single page.
      *
@@ -40,12 +47,26 @@ class PageFetcher
             return null;
         }
 
+        $target = $this->guard->validate($url);
+
+        if ($target === null) {
+            // Fail closed: the guard rejected this target (private IP, docker
+            // service name, non-public DNS record, ...). Callers treat a null
+            // like any other fetch failure — the agent skips this source and
+            // keeps the batch going (US2 acceptance 2).
+            return null;
+        }
+
         try {
             $response = Http::withHeaders($this->headers())
                 ->timeout($this->timeout())
                 ->withOptions($this->options())
                 ->get($url);
         } catch (Throwable) {
+            return null;
+        }
+
+        if ($response === null) {
             return null;
         }
 

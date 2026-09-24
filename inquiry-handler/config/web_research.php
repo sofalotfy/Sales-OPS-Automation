@@ -20,7 +20,8 @@ return [
     |
     | The remaining keys bound the AI research agent that filters the gathered
     | candidates to the named company/person, fetches the kept source pages,
-    | and summarizes them (feature 010). Every run stays within these budgets;
+    | and extracts everything they state into the findings (feature 010/011).
+    | Every run stays within these budgets;
     | an over-budget run degrades to partial/indeterminate rather than hanging.
     |
     */
@@ -34,7 +35,7 @@ return [
     // Tavily provider returns (the provider already de-duplicates by URL).
     'max_candidates' => (int) env('WEB_RESEARCH_MAX_CANDIDATES', 40),
 
-    // Maximum kept sources the agent fetches and cites in the summary.
+    // Maximum kept sources the agent fetches and cites in the extraction.
     'max_sources' => (int) env('WEB_RESEARCH_MAX_SOURCES', 40),
 
     // Per-page fetch timeout (seconds), simultaneous downloads per batch, and
@@ -46,10 +47,13 @@ return [
     // Maximum extracted characters kept per fetched source page.
     'source_max_chars' => (int) env('WEB_RESEARCH_SOURCE_MAX_CHARS', 8000),
 
-    // Maximum characters of documents sent in ONE AI call. Pages that fit
-    // together take a single final-call summary; larger sets are first reduced
-    // to per-page notes by the layer-1 analyst calls.
-    'summary_max_input_chars' => (int) env('WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS', 60000),
+    // Maximum characters of documents sent in ONE AI call. Text that fits
+    // goes straight to a single final extraction; larger sets are first
+    // reduced to per-page notes by the layer-1 analyst calls, then the final
+    // extraction runs once PER chunk of notes and the parts are merged. Sized
+    // so a real prose batch stays under the Groq free-tier 8K token-per-minute
+    // ceiling (input + output; English tokenizes at ~2.5 chars/token).
+    'summary_max_input_chars' => (int) env('WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS', 8000),
 
     // Overall wall-clock budget for one agent run (seconds). Over-budget runs
     // return what was legitimately gathered (partial) or indeterminate.
@@ -62,6 +66,13 @@ return [
 
     // Layer-1 (per-page notes) attempts when the model returns unparseable output.
     'note_attempts' => (int) env('WEB_RESEARCH_NOTE_ATTEMPTS', 2),
+
+    // Layer-1 notes output cap (tokens). Notes EXTRACT the pages' detail, so the
+    // output budget is generous; it also bounds the per-note text kept by the
+    // agent (≈4 chars/token, well above the old 800-char note truncation).
+    // It keeps input + output of every call inside the 8K TPM window even when
+    // several batches fire in the same minute.
+    'note_max_output_tokens' => (int) env('WEB_RESEARCH_NOTE_MAX_OUTPUT_TOKENS', 1024),
 
     // Best-effort rescue: when the AI filter can settle nothing (not_found /
     // ambiguous / empty keep) but candidates still carry the target's name,

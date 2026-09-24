@@ -187,7 +187,7 @@ PROMPT;
      */
     private function userPrompt(string $company, ?string $countryRegion, array $findings): string
     {
-        $summary = trim((string) ($findings['summary'] ?? ''));
+        $summary = $this->promptExcerpt(trim((string) ($findings['summary'] ?? '')));
 
         $lines = [];
         foreach ((array) ($findings['sources'] ?? []) as $source) {
@@ -236,5 +236,21 @@ PROMPT;
         }
 
         return implode("\n", array_map(fn (string $line) => "  {$line}", $lines));
+    }
+
+    /**
+     * The stored findings keep the FULL extraction (feature 011); only the copy
+     * embedded into this AI prompt is bounded to the single-call input size so
+     * a very long extraction cannot blow the request.
+     */
+    private function promptExcerpt(string $summary): string
+    {
+        $limit = max(1000, (int) config('web_research.summary_max_input_chars', 8000));
+
+        if (mb_strlen($summary) <= $limit) {
+            return $summary;
+        }
+
+        return mb_substr($summary, 0, $limit).'…';
     }
 }

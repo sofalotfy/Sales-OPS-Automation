@@ -129,18 +129,23 @@ All knobs are env-driven (see `.env.example`):
 | `DB_*`                         | Scoped store (`inquiry_handler`) for weights + classification log. |
 | `SERVICE_USERNAME`             | Service account for the RAG bearer token.            |
 | `SERVICE_PASSWORD`             | Service account password. Never commit a real value. |
-| `ZAI_API_KEY`                  | Z.AI API key. Never commit a real value.             |
-| `ZAI_MODEL`                    | Default (scope/general) Z.AI model id (default `glm-4.5-flash`). |
-| `ZAI_RESEARCH_MODEL`           | Model id for the AI research agent's filter + summarize steps (default `glm-4.7-flash`). |
-| `ZAI_TIMEOUT`                  | Per-request AI HTTP timeout in seconds (default 90; free-tier flash models are slow). |
+| `AI_API_KEY`                   | Groq API key. Never commit a real value.             |
+| `AI_API_URL`                   | AI chat-completions endpoint (default Groq, OpenAI-compatible). |
+| `AI_MODEL`                     | Default (scope/general) AI model id (default `openai/gpt-oss-20b`). |
+| `AI_RESEARCH_MODEL`            | Model id for the research agent's layer-1 notes + final extraction (default `openai/gpt-oss-120b`). |
+| `AI_FILTER_MODEL`              | Model id for the research candidate filter (default `openai/gpt-oss-20b`). |
+| `AI_CONCURRENCY`               | Max in-flight AI requests when a step fans out, e.g. layer-1 notes batches (default 4). |
+| `AI_MAX_OUTPUT_TOKENS`         | Cap on generated tokens per AI call (default 4096).  |
+| `AI_TIMEOUT`                   | Per-request AI HTTP timeout in seconds (default 90).   |
 | `WEB_RESEARCH_MAX_CANDIDATES`   | Candidate results the agent considers before the AI filter (default 40, i.e. everything the provider returns). |
 | `WEB_RESEARCH_MAX_SOURCES`      | Kept sources the agent fetches and cites (default 40). |
 | `WEB_RESEARCH_FETCH_TIMEOUT`    | Per-page fetch timeout in seconds (default 8).        |
 | `WEB_RESEARCH_FETCH_CONCURRENCY`| Simultaneous page downloads per batch (default 10).   |
-| `WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS` | Documents fit in a single AI call below this; larger sets go through layer-1 per-page notes (default 60000). |
+| `WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS` | Documents that fit in a single AI call go straight to one final extraction; larger sets go through layer-1 per-page notes and the final extraction then runs once PER chunk of notes, with the parts merged so nothing is dropped (default 8000, sized so one realistic prose batch stays under Groq's 8K token/min free tier). Layer-1 batches run concurrently up to `AI_CONCURRENCY`, and transient 413 (token-per-minute) / 429 / 5xx responses are retried with backoff. |
 | `WEB_RESEARCH_STEP_TIMEOUT`     | Wall-clock budget for one research agent run (default 90). |
 | `WEB_RESEARCH_FILTER_ATTEMPTS`  | AI filter retries on unparseable output (default 2). |
 | `WEB_RESEARCH_NOTE_ATTEMPTS`    | Layer-1 per-page notes retries on unparseable output (default 2). |
+| `WEB_RESEARCH_NOTE_MAX_OUTPUT_TOKENS` | Layer-1 notes output cap and per-note text bound (default 1024; keeps input + output of every notes call inside the 8K token/min window while notes EXTRACT the pages' detail verbatim). |
 | `WEB_RESEARCH_RESCUE_ON_NAME_MATCH` | Best-effort rescue for scarce data: fetch + summarize name-matching candidates and mark the result `uncertain` (default `true`). |
 | `COMPANY_SCOPE`                | Company/scope statement injected into the fixed system prompt (persisted per inquiry as `system_prompt`). |
 | `BOOKING_URL`                  | Booking link substituted into the `high` reply only when it is a valid URL. |

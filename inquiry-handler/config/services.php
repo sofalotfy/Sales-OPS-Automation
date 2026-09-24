@@ -27,18 +27,27 @@ return [
             .'automation workflows, and sales/CRM tooling for B2B software companies',
     ),
 
-    'zai' => [
-        'key' => env('ZAI_API_KEY'),
-        // Default (weaker, cheap) model for scope checks and any non-research
-        // AI call. Kept separate from the research agent's model so the
-        // stronger one is only spent where it earns its keep.
-        'model' => env('ZAI_MODEL', 'glm-4.5-flash'),
-        // Strongest model for the AI research agent's filter + summarize steps.
-        'research_model' => env('ZAI_RESEARCH_MODEL', 'glm-4.7-flash'),
-        // Per-request HTTP timeout. The free-tier flash models are slow
-        // (seconds to ~20s per call), so this needs to be generous.
-        'timeout' => (int) env('ZAI_TIMEOUT', 90),
-        'url' => env('ZAI_API_URL', 'https://api.z.ai/api/paas/v4/chat/completions'),
+    'ai' => [
+        'key' => env('AI_API_KEY'),
+        // Default (lighter, fast) model for scope checks and any non-research
+        // AI call. Kept separate from the research agent's models so stronger
+        // ones are only spent where they earn their keep.
+        'model' => env('AI_MODEL', 'openai/gpt-oss-20b'),
+        // Strongest model for the AI research agent's notes + summarize steps.
+        'research_model' => env('AI_RESEARCH_MODEL', 'openai/gpt-oss-120b'),
+        // Research candidate filter model: cheap/fast, it only keeps/rejects
+        // candidate URLs so it does not need the strongest weights.
+        'filter_model' => env('AI_FILTER_MODEL', 'openai/gpt-oss-20b'),
+        // Max concurrent in-flight AI requests when a step fans out (layer-1
+        // notes batches). Bounded by Groq free-tier limits (30 RPM, 8K TPM);
+        // bursts above the token ceiling self-throttle via 429 + retry-after.
+        'concurrency' => max(1, (int) env('AI_CONCURRENCY', 4)),
+        // Cap on generated tokens per call. gpt-oss defaults to 65K output,
+        // which would burn a free tier's daily budget on one summary.
+        'max_output_tokens' => max(1, (int) env('AI_MAX_OUTPUT_TOKENS', 4096)),
+        // Per-request HTTP timeout (seconds).
+        'timeout' => (int) env('AI_TIMEOUT', 90),
+        'url' => env('AI_API_URL', 'https://api.groq.com/openai/v1/chat/completions'),
     ],
 
     'service_account' => [

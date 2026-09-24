@@ -26,9 +26,9 @@ class UpstreamStubs
         return trim((string) config('services.rag_api_url'), '/').'/query';
     }
 
-    public static function zaiUrl(): string
+    public static function aiUrl(): string
     {
-        return (string) config('services.zai.url');
+        return (string) config('services.ai.url');
     }
 
     public static function bookingUrl(): string
@@ -112,7 +112,7 @@ class UpstreamStubs
             }
 
             if ($request->url() !== self::ragQueryUrl()) {
-                return null; // let other stubs (e.g. Z.AI) handle this request
+                return null; // let other stubs (e.g. the AI provider) handle this request
             }
 
             $calls++;
@@ -130,12 +130,12 @@ class UpstreamStubs
         });
     }
 
-    public static function fakeZai(string $disposition = 'booking', ?string $reply = null, string $reasoning = 'meeting-ready intent'): void
+    public static function fakeAi(string $disposition = 'booking', ?string $reply = null, string $reasoning = 'meeting-ready intent'): void
     {
         $reply ??= 'Pick a time here: '.self::bookingUrl();
 
         Http::fake([
-            self::zaiUrl() => Http::response([
+            self::aiUrl() => Http::response([
                 'choices' => [[
                     'message' => ['content' => json_encode([
                         'disposition' => $disposition,
@@ -148,17 +148,17 @@ class UpstreamStubs
     }
 
     /** Raw content string to simulate non-JSON or malformed provider output. */
-    public static function fakeZaiJson(string $content): void
+    public static function fakeAiJson(string $content): void
     {
         Http::fake([
-            self::zaiUrl() => Http::response([
+            self::aiUrl() => Http::response([
                 'choices' => [['message' => ['content' => $content]]],
             ], 200),
         ]);
     }
 
     /** Company-size factor (feature 009): the AI size estimate parsed back. */
-    public static function fakeZaiFactorScore(
+    public static function fakeAiFactorScore(
         int $score,
         ?string $reasoning = null,
         ?string $sizeBand = null,
@@ -169,7 +169,7 @@ class UpstreamStubs
             : 'Estimated from the public research findings.';
 
         Http::fake([
-            self::zaiUrl() => Http::response([
+            self::aiUrl() => Http::response([
                 'choices' => [['message' => ['content' => json_encode([
                     'score' => $score,
                     'size_band' => $sizeBand,
@@ -195,7 +195,7 @@ class UpstreamStubs
     private static function fakeScopeResult(bool $inScope, string $reason): void
     {
         Http::fake([
-            self::zaiUrl() => Http::response([
+            self::aiUrl() => Http::response([
                 'choices' => [[
                     'message' => ['content' => json_encode([
                         'in_scope' => $inScope,
@@ -206,10 +206,10 @@ class UpstreamStubs
         ]);
     }
 
-    public static function fakeZaiFailure(int $status = 500): void
+    public static function fakeAiFailure(int $status = 500): void
     {
         Http::fake([
-            self::zaiUrl() => Http::response(['error' => ['message' => 'provider down']], $status),
+            self::aiUrl() => Http::response(['error' => ['message' => 'provider down']], $status),
         ]);
     }
 
@@ -239,7 +239,7 @@ class UpstreamStubs
         Http::fake([
             self::authUrl('/auth/login') => Http::response(self::loginResponse(), 200),
             self::ragQueryUrl() => Http::response(['detail' => 'unavailable'], 503),
-            self::zaiUrl() => Http::response(['error' => 'down'], 500),
+            self::aiUrl() => Http::response(['error' => 'down'], 500),
         ]);
     }
 

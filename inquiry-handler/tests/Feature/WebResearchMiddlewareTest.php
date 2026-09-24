@@ -96,7 +96,7 @@ class WebResearchMiddlewareTest extends TestCase
         $this->fakeClassificationUpstreams();
         // The company-size factor (feature 009) consumes the completed findings
         // with an AI call; make it deterministic for this run.
-        Stubs::fakeZaiFactorScore(0, 'The research findings gave no company-size signal.');
+        Stubs::fakeAiFactorScore(0, 'The research findings gave no company-size signal.');
 
         $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
 
@@ -142,7 +142,7 @@ class WebResearchMiddlewareTest extends TestCase
         ));
 
         $this->fakeClassificationUpstreams();
-        Stubs::fakeZaiFactorScore(85, 'About 5,000 staff and a global footprint place this in the large tier.', 'large', 5000);
+        Stubs::fakeAiFactorScore(85, 'About 5,000 staff and a global footprint place this in the large tier.', 'large', 5000);
 
         $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
 
@@ -335,5 +335,88 @@ class WebResearchMiddlewareTest extends TestCase
         $row = ClassificationResult::orderByDesc('id')->first();
         $this->assertNull($row->web_research_outcome);
         $this->assertNull($row->web_research);
+    }
+
+    // ----------------------------------------- feature 011: extraction findings
+
+    public function test_findings_shape_stays_stable_for_a_full_extraction_text(): void
+    {
+        $extraction = 'Full extraction text. '.str_repeat('x ', 500);
+        $this->bindProvider(fn (array $criteria) => [
+            'company' => ['results' => [['title' => 'Example Corp', 'url' => 'https://example.com/about', 'snippet' => 'Fintech']]],
+            'person' => ['results' => []],
+        ]);
+        $this->bindAgent(new ResearchResult(
+            ResearchOutcome::Completed,
+            $extraction,
+            [['title' => 'About Example Corp', 'url' => 'https://example.com/about']],
+            null,
+            audit: [],
+        ));
+
+        $this->fakeClassificationUpstreams();
+        Stubs::fakeAiFactorScore(40, 'No reliable company-size signal.');
+
+        $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
+
+        $response->assertOk()
+            ->assertJsonPath('context.web_research.findings.outcome', 'completed')
+            ->assertJsonPath('context.web_research.findings.summary', $extraction)
+            ->assertJsonPath('context.web_research.findings.sources.0.url', 'https://example.com/about');
+
+        $findings = (array) $response->json('context.web_research.findings');
+        $this->assertIsString($findings['summary'] ?? null);
+        $this->assertIsArray($findings['sources'] ?? null);
+        $this->assertArrayHasKey('limitations', $findings);
+    }
+
+    public function test_persisted_web_research_keeps_the_full_extraction_text(): void
+    {
+        $extraction = str_repeat('Detailed fact line about Example Corp operations, staff and products. ', 60);
+        $this->bindProvider(fn (array $criteria) => [
+            'company' => ['results' => [['title' => 'Example Corp', 'url' => 'https://example.com/about', 'snippet' => 'Fintech']]],
+            'person' => ['results' => []],
+        ]);
+        $this->bindAgent(new ResearchResult(
+            ResearchOutcome::Completed,
+            $extraction,
+            [['title' => 'About Example Corp', 'url' => 'https://example.com/about']],
+            null,
+            audit: ['counts' => ['obtained' => 1, 'kept' => 1, 'rejected' => 0]],
+        ));
+
+        $this->fakeClassificationUpstreams();
+        Stubs::fakeAiFactorScore(40, 'No reliable company-size signal.');
+
+        $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
+
+        $row = ClassificationResult::orderByDesc('id')->first();
+        $this->assertSame($extraction, $row->web_research['findings']['summary']);
+        $this->assertSame($extraction, $response->json('context.web_research.findings.summary'));
+    }
+
+    public function test_partial_run_persists_a_named_gap_in_the_findings(): void
+    {
+        $this->bindProvider(fn (array $criteria) => [
+            'company' => ['results' => [['title' => 'Example Corp', 'url' => 'https://example.com/about', 'snippet' => 'Fintech']]],
+            'person' => ['results' => []],
+        ]);
+        $this->bindAgent(new ResearchResult(
+            ResearchOutcome::Partial,
+            'Partial extraction retained.',
+            [['title' => 'About Example Corp', 'url' => 'https://example.com/about']],
+            'Some fetched pages could not be analysed (1 batch(es) failed), so the profile may be incomplete.',
+            audit: [],
+        ));
+
+        $this->fakeClassificationUpstreams();
+        Stubs::fakeAiFactorScore(20, 'No reliable company-size signal.');
+
+        $response = $this->postJson('/inquiry/triage', $this->payload('Do you build enterprise web applications?'));
+
+        $row = ClassificationResult::orderByDesc('id')->first();
+        $this->assertSame('partial', $row->web_research['findings']['outcome']);
+        $this->assertStringContainsString('1 batch(es) failed', $row->web_research['findings']['limitations']);
+        $this->assertStringContainsString('1 batch(es) failed', (string) $response->json('context.web_research.findings.limitations'));
     }
 }

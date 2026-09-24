@@ -118,7 +118,7 @@ class CompanySizeFactorTest extends TestCase
     public function test_ai_estimate_is_parsed_into_the_verdict(): void
     {
         Http::fake([
-            trim((string) config('services.zai.url')) => Http::response([
+            trim((string) config('services.ai.url')) => Http::response([
                 'choices' => [['message' => ['content' => json_encode([
                     'score' => 80,
                     'size_band' => 'large',
@@ -139,7 +139,7 @@ class CompanySizeFactorTest extends TestCase
     public function test_zero_ai_estimate_is_passed_through_honestly(): void
     {
         Http::fake([
-            trim((string) config('services.zai.url')) => Http::response([
+            trim((string) config('services.ai.url')) => Http::response([
                 'choices' => [['message' => ['content' => json_encode([
                     'score' => 0,
                     'size_band' => null,
@@ -158,7 +158,7 @@ class CompanySizeFactorTest extends TestCase
     public function test_ai_failure_degrades_to_zero_without_throwing(): void
     {
         Http::fake([
-            trim((string) config('services.zai.url')) => Http::response(['error' => ['message' => 'provider down']], 500),
+            trim((string) config('services.ai.url')) => Http::response(['error' => ['message' => 'provider down']], 500),
         ]);
 
         $verdict = $this->factor()->score(self::INQUIRY, $this->context());
@@ -169,7 +169,7 @@ class CompanySizeFactorTest extends TestCase
     public function test_unparseable_ai_output_degrades_to_zero(): void
     {
         Http::fake([
-            trim((string) config('services.zai.url')) => Http::response([
+            trim((string) config('services.ai.url')) => Http::response([
                 'choices' => [['message' => ['content' => 'definitely not json']]],
             ], 200),
         ]);
@@ -182,7 +182,7 @@ class CompanySizeFactorTest extends TestCase
     public function test_out_of_range_ai_score_degrades_to_zero(): void
     {
         Http::fake([
-            trim((string) config('services.zai.url')) => Http::response([
+            trim((string) config('services.ai.url')) => Http::response([
                 'choices' => [['message' => ['content' => json_encode(['score' => -5, 'reasoning' => 'n/a'])]]],
             ], 200),
         ]);
@@ -193,7 +193,7 @@ class CompanySizeFactorTest extends TestCase
     public function test_ai_call_sends_only_company_and_findings_not_contacts(): void
     {
         Http::fake([
-            trim((string) config('services.zai.url')) => Http::response([
+            trim((string) config('services.ai.url')) => Http::response([
                 'choices' => [['message' => ['content' => json_encode([
                     'score' => 65,
                     'size_band' => 'mid',
@@ -218,6 +218,40 @@ class CompanySizeFactorTest extends TestCase
             $this->assertStringContainsString('United Kingdom', $payload);
             $this->assertStringContainsString('roughly 2,500 employees', $payload);
             $this->assertStringContainsString('example.com', $payload);
+
+            return true;
+        });
+    }
+
+    public function test_ai_prompt_bounds_a_long_extraction_summary(): void
+    {
+        // The stored findings keep the FULL extraction (feature 011); only the
+        // value embedded into this AI prompt is bounded to the single-call size.
+        config()->set('web_research.summary_max_input_chars', 1000);
+
+        $summary = str_repeat('a', 1100).'tailMarkerXYZ';
+        $findings = array_merge(self::FINDINGS, ['summary' => $summary]);
+
+        Http::fake([
+            trim((string) config('services.ai.url')) => Http::response([
+                'choices' => [['message' => ['content' => json_encode([
+                    'score' => 10,
+                    'size_band' => 'small',
+                    'employee_count' => 15,
+                    'reasoning' => 'Small team.',
+                ])]]],
+            ], 200),
+        ]);
+
+        $this->factor()->score(self::INQUIRY, $this->context($findings));
+
+        Http::assertSent(function (Request $request) {
+            $payload = (string) json_encode($request->data());
+
+            // The tail beyond the bound must NOT reach the prompt...
+            $this->assertStringNotContainsString('tailMarkerXYZ', $payload);
+            // ...but the head of the extraction must.
+            $this->assertStringContainsString(str_repeat('a', 100), $payload);
 
             return true;
         });

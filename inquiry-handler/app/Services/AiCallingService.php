@@ -4,11 +4,13 @@ namespace App\Services;
 
 use App\Triage\PromptBuilder;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Throwable;
 
 /**
- * Isolated caller for the AI provider (Z.AI hosting the GLM open-source
+ * Isolated caller for the AI provider (Groq serving the GPT-OSS open-weight
  * model family) — contract: ai-provider.md, research §3. The provider/model/key
  * are fully env-driven (FR-011) so the provider can be swapped by changing config.
  *
@@ -35,21 +37,23 @@ class AiCallingService
      */
     public function triage(string $inquiry, array $retrievedContext): array
     {
-        $key = (string) config('services.zai.key');
+        $key = (string) config('services.ai.key');
 
         if ($key === '') {
-            return $this->failure('Missing ZAI_API_KEY configuration.');
+            return $this->failure('Missing AI_API_KEY configuration.');
         }
 
         $prompt = $this->promptBuilder->build($inquiry, $retrievedContext);
 
-        // Not every Z.AI-hosted model supports response_format; fall back to a
+        // Not every AI-hosted model supports response_format; fall back to a
         // plain request on a 422 (provider-level validation) once (ai-provider.md).
+        $job = ['system' => $prompt['system'] ?? '', 'user' => $prompt['user'] ?? ''];
+
         try {
-            $response = $this->call($prompt, $key, withJsonMode: true);
+            $response = $this->call($job, $key, withJsonMode: true);
 
             if ($response->status() === 422) {
-                $response = $this->call($prompt, $key, withJsonMode: false);
+                $response = $this->call($job, $key, withJsonMode: false);
             }
         } catch (ConnectionException) {
             // Request-level failure (DNS/connection/TCP timeout). Degrades to
@@ -99,28 +103,28 @@ class AiCallingService
      * system/user prompt and calls this method.
      *
      * `$model` selects the model id for this one call; when omitted the default
-     * `services.zai.model` is used. Callers needing a stronger/weaker model for
+     * `services.ai.model` is used. Callers needing a stronger/weaker model for
      * a specific step (e.g. the research agent) pass it explicitly.
      *
      * @return array<mixed>|null
      */
     public function complete(string $system, string $user, ?string $model = null): ?array
     {
-        $key = (string) config('services.zai.key');
+        $key = (string) config('services.ai.key');
 
         if ($key === '') {
             return null;
         }
 
-        $prompt = ['system' => $system, 'user' => $user];
+        $job = ['system' => $system, 'user' => $user, 'model' => $model];
 
         $response = null;
         for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
             try {
-                $response = $this->call($prompt, $key, withJsonMode: true, model: $model);
+                $response = $this->call($job, $key, withJsonMode: true);
 
                 if ($response->status() === 422) {
-                    $response = $this->call($prompt, $key, withJsonMode: false, model: $model);
+                    $response = $this->call($job, $key, withJsonMode: false);
                 }
             } catch (ConnectionException) {
                 // A slammed/slow provider hangs rather than failing fast; do not
@@ -132,11 +136,12 @@ class AiCallingService
                 break;
             }
 
-            // Only transparent-rate-limit/overload responses retry; these come
-            // back in milliseconds, so a short backoff costs almost nothing
-            // while riding through the free tier's transient 429 bursts.
-            if (in_array($response->status(), [429, 500, 502, 503, 504], true) && $attempt < self::MAX_RETRIES) {
-                usleep($attempt * 2_000_000);
+            // Only transparent rate-limit/overload responses retry; these come
+            // back in milliseconds or seconds (TPM/RPM ceilings), so a short
+            // backoff costs almost nothing while riding through the free tier's
+            // transient 413 (token-per-minute) and 429 bursts.
+            if (in_array($response->status(), [413, 429, 500, 502, 503, 504], true) && $attempt < self::MAX_RETRIES) {
+                usleep(min(30, $this->retryAfterSeconds($response) ?: $attempt * 2) * 1_000_000);
                 continue;
             }
 
@@ -150,6 +155,159 @@ class AiCallingService
         }
 
         return $this->extractJsonArray($content);
+    }
+
+    /**
+     * Run several AI completions concurrently, resolving each job independently.
+     *
+     * Each job is `['key' => string, 'system' => string, 'user' => string,
+     * 'model' => ?string]` (plus an optional `max_tokens` output cap). The whole
+     * set is fired together with the number of in-flight requests bounded by
+     * `services.ai.concurrency`. A 413 (token-per-minute)/429/5xx subset is
+     * re-fired with backoff (honouring Groq's `Retry-After` header) across up to
+     * `MAX_RETRIES` rounds; a 422 falls back to plain mode once. Any job that
+     * still fails resolves to `null` (fail-open, FR-007).
+     *
+     * This is the parallel path for the research agent's layer-1 per-page notes:
+     * independent batches no longer wait on each other.
+     *
+     * @param  array<int, array{key: string, system: string, user: string, model?: string|null, max_tokens?: int}>  $jobs
+     * @return array<string, array<mixed>|null>
+     */
+    public function completeMany(array $jobs): array
+    {
+        $key = (string) config('services.ai.key');
+
+        $pending = [];
+        $results = [];
+
+        foreach ($jobs as $job) {
+            $jobKey = (string) ($job['key'] ?? '');
+
+            if ($jobKey === '') {
+                continue;
+            }
+
+            $pending[$jobKey] = $job;
+            $results[$jobKey] = null;
+        }
+
+        if ($key === '' || $pending === []) {
+            return $results;
+        }
+
+        $concurrency = max(1, (int) config('services.ai.concurrency', 4));
+        $timeout = (int) config('services.ai.timeout', 90);
+
+        for ($attempt = 1; $pending !== [] && $attempt <= self::MAX_RETRIES; $attempt++) {
+            try {
+                $responses = Http::pool(
+                    function (Pool $pool) use ($pending, $key, $timeout) {
+                        foreach ($pending as $jobKey => $job) {
+                            $pool->as($jobKey)
+                                ->withToken($key)
+                                ->acceptJson()
+                                ->asJson()
+                                ->timeout($timeout)
+                                ->post((string) config('services.ai.url'), $this->payload($job, true));
+                        }
+                    },
+                    $concurrency,
+                );
+            } catch (Throwable) {
+                break;
+            }
+
+            if (! is_array($responses)) {
+                break;
+            }
+
+            $retry = [];
+            $retryAfter = 0;
+
+            foreach ($responses as $jobKey => $response) {
+                // Pool response keys mirror the `as($key)` names; numeric-string
+                // keys arrive as PHP ints, so normalise before matching against
+                // `$pending` (also keyed by string-indexed array → ints).
+                $jobKey = (string) $jobKey;
+
+                if (! isset($pending[$jobKey])) {
+                    continue;
+                }
+
+                $job = $pending[$jobKey];
+
+                if ($response instanceof Response
+                    && in_array($response->status(), [413, 429, 500, 502, 503, 504], true)
+                    && $attempt < self::MAX_RETRIES) {
+                    $retry[$jobKey] = $job;
+                    $retryAfter = max($retryAfter, $this->retryAfterSeconds($response));
+
+                    continue;
+                }
+
+                $resolved = $this->resolveResponse($job, $response);
+                $results[$jobKey] = $resolved;
+            }
+
+            if ($retry === []) {
+                break;
+            }
+
+            // Token-per-minute ceilings free up on a ~60s window; wait at least
+            // a couple of seconds (or the provider's Retry-After when present).
+            usleep(max(2, min(30, $retryAfter > 0 ? $retryAfter : $attempt * 2)) * 1_000_000);
+            $pending = $retry;
+        }
+
+        return $results;
+    }
+
+    /**
+     * Decode one pooled response for a job. A 422 is retried once in plain mode
+     * (some providers/models reject response_format validation); anything else
+     * that is not a successful, decodable JSON array resolves to `null`.
+     *
+     * @param  array<string, mixed>  $job
+     * @return array<mixed>|null
+     */
+    private function resolveResponse(array $job, mixed $response): ?array
+    {
+        if (! $response instanceof Response) {
+            return null;
+        }
+
+        if ($response->status() === 422) {
+            try {
+                $response = $this->call($job, (string) config('services.ai.key'), withJsonMode: false);
+            } catch (ConnectionException) {
+                return null;
+            }
+        }
+
+        if ($response->successful()) {
+            $content = $response->json('choices.0.message.content');
+
+            if (is_string($content)) {
+                return $this->extractJsonArray($content);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Seconds to pause for a rate-limited response, 0 when absent or unusable.
+     */
+    private function retryAfterSeconds(Response $response): int
+    {
+        $value = trim((string) $response->header('Retry-After'));
+
+        if ($value === '' || ! ctype_digit($value)) {
+            return 0;
+        }
+
+        return min((int) $value, 30);
     }
 
     /**
@@ -215,16 +373,45 @@ class AiCallingService
     }
 
     /**
-     * @param  array{system: string, user: string}  $prompt
+     * @param  array<string, mixed>  $job  `['system' => string, 'user' => string, 'model' => ?string]`
      */
-    private function call(array $prompt, string $key, bool $withJsonMode, ?string $model = null): Response
+    private function call(array $job, string $key, bool $withJsonMode): Response
     {
+        return Http::baseUrl('')
+            ->withToken($key)
+            ->acceptJson()
+            ->asJson()
+            ->timeout((int) config('services.ai.timeout', 90))
+            ->post((string) config('services.ai.url'), $this->payload($job, $withJsonMode));
+    }
+
+    /**
+     * Chat-completions payload for one job: model, fixed temperature, an output
+     * cap (gpt-oss defaults to 65K output tokens, and free-tier daily budgets
+     * evaporate fast), and optional JSON-object response format. Jobs carrying
+     * a `max_tokens` output cap (e.g. terse layer-1 notes) use it so a single
+     * request stays under the free tier's token-per-minute ceiling.
+     *
+     * @param  array<string, mixed>  $job  `['system' => string, 'user' => string, 'model' => ?string, 'max_tokens' => ?int]`
+     * @return array<string, mixed>
+     */
+    private function payload(array $job, bool $withJsonMode): array
+    {
+        $model = isset($job['model']) && is_string($job['model']) && $job['model'] !== ''
+            ? $job['model']
+            : (string) config('services.ai.model', 'openai/gpt-oss-20b');
+
+        $maxOutputTokens = is_int($job['max_tokens'] ?? null) && $job['max_tokens'] > 0
+            ? $job['max_tokens']
+            : max(1, (int) config('services.ai.max_output_tokens', 4096));
+
         $payload = [
-            'model' => $model ?? (string) config('services.zai.model', 'glm-4.7-flash'),
+            'model' => $model,
             'temperature' => 0,
+            'max_completion_tokens' => $maxOutputTokens,
             'messages' => [
-                ['role' => 'system', 'content' => $prompt['system']],
-                ['role' => 'user', 'content' => $prompt['user']],
+                ['role' => 'system', 'content' => $job['system']],
+                ['role' => 'user', 'content' => $job['user']],
             ],
         ];
 
@@ -232,12 +419,7 @@ class AiCallingService
             $payload['response_format'] = ['type' => 'json_object'];
         }
 
-        return Http::baseUrl('')
-            ->withToken($key)
-            ->acceptJson()
-            ->asJson()
-            ->timeout((int) config('services.zai.timeout', 90))
-            ->post((string) config('services.zai.url'), $payload);
+        return $payload;
     }
 
     /**

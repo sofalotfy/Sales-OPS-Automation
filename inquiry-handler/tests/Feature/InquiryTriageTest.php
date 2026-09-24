@@ -150,7 +150,7 @@ class InquiryTriageTest extends TestCase
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZai('booking');
+        Stubs::fakeAi('booking');
 
         $this->postJson('/inquiry/triage', [
             'message' => 'Hello there.',

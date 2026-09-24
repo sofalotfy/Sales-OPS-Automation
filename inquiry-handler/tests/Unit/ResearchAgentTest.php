@@ -6,6 +6,7 @@ use App\Services\AiCallingService;
 use App\WebResearch\PageFetcher;
 use App\WebResearch\ResearchAgent;
 use App\WebResearch\ResearchOutcome;
+use App\WebResearch\ResearchResult;
 use Mockery;
 use Tests\TestCase;
 
@@ -120,8 +121,11 @@ class ResearchAgentTest extends TestCase
             'uncertain' => false,
         ], $result->toFindings());
         $this->assertCount(2, $this->aiCalls);
-        $researchModel = (string) config('services.zai.research_model', 'glm-4.7-flash');
-        $this->assertSame($researchModel, $this->aiCalls[0]['model']);
+        // The candidate filter uses the cheap/fast model; the final summary the
+        // strong research model.
+        $filterModel = (string) config('services.ai.filter_model', 'openai/gpt-oss-20b');
+        $researchModel = (string) config('services.ai.research_model', 'openai/gpt-oss-120b');
+        $this->assertSame($filterModel, $this->aiCalls[0]['model']);
         $this->assertSame($researchModel, $this->aiCalls[1]['model']);
 
         $this->assertSame(['obtained' => 2, 'kept' => 1, 'rejected' => 1], $result->audit['counts']);
@@ -132,9 +136,10 @@ class ResearchAgentTest extends TestCase
         $this->assertFalse($result->audit['rescue_used']);
     }
 
-    public function test_research_uses_the_configured_research_model(): void
+    public function test_research_uses_the_configured_filter_and_research_models(): void
     {
-        config(['services.zai.research_model' => 'glm-4.5-flash']);
+        config(['services.ai.filter_model' => 'filter-test-model']);
+        config(['services.ai.research_model' => 'research-test-model']);
 
         $url = 'https://example.com/about';
         $agent = $this->makeAgent(
@@ -145,8 +150,8 @@ class ResearchAgentTest extends TestCase
         $agent->research($this->criteria(), $this->payload([$this->candidate('Example Corp', $url)]));
 
         $this->assertCount(2, $this->aiCalls);
-        $this->assertSame('glm-4.5-flash', $this->aiCalls[0]['model']);
-        $this->assertSame('glm-4.5-flash', $this->aiCalls[1]['model']);
+        $this->assertSame('filter-test-model', $this->aiCalls[0]['model']);
+        $this->assertSame('research-test-model', $this->aiCalls[1]['model']);
     }
 
     public function test_filter_prompt_keeps_target_and_candidates_in_the_user_role_only(): void
@@ -458,5 +463,327 @@ class ResearchAgentTest extends TestCase
 
         $this->assertSame(ResearchOutcome::Completed, $result->outcome);
         $this->assertStringContainsString('could not be established', $result->summary);
+    }
+
+    public function test_layer1_batches_run_concurrently_with_the_research_model(): void
+    {
+        // Small per-call budget with long pages forces layer 1: each page is its
+        // own batch, and all batches are analysed in ONE concurrent round.
+        config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_attempts', 1);
+
+        $urls = ['https://a.example', 'https://b.example', 'https://c.example'];
+        $pages = [];
+        $candidates = [];
+
+        foreach ($urls as $i => $url) {
+            $pages[$url] = $this->page('Page '.$i, $url, str_repeat('x', 500).' body');
+            $candidates[] = $this->candidate('Example Corp '.$i, $url);
+        }
+
+        $concurrentRounds = 0;
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                // First completion is the candidate filter; the last the final summary.
+                return count($this->aiCalls) === 1
+                    ? $this->filterOk([1, 2, 3])
+                    : $this->summaryOk('Final profile from concurrent notes.');
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(
+            function (array $jobs) use (&$concurrentRounds) {
+                $concurrentRounds++;
+                $results = [];
+
+                foreach ($jobs as $job) {
+                    $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+                    $results[$job['key']] = ['notes' => [['id' => 1, 'relevant' => true, 'facts' => 'Facts about the page.']]];
+                }
+
+                return $results;
+            },
+        );
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher($pages));
+        $result = $agent->research($this->criteria(), $this->payload($candidates));
+
+        $this->assertSame(ResearchOutcome::Completed, $result->outcome);
+        $this->assertSame('Final profile from concurrent notes.', $result->summary);
+        $this->assertCount(3, $result->sources);
+        $this->assertSame(1, $concurrentRounds);
+
+        // filter + 3 concurrent notes + 1 final summary = 5 AI turns, all notes
+        // on the strong research model and the filter on the cheap one.
+        $this->assertCount(5, $this->aiCalls);
+        $this->assertSame((string) config('services.ai.filter_model', 'openai/gpt-oss-20b'), $this->aiCalls[0]['model']);
+
+        $researchModel = (string) config('services.ai.research_model', 'openai/gpt-oss-120b');
+        $this->assertSame($researchModel, $this->aiCalls[1]['model']);
+        $this->assertSame($researchModel, $this->aiCalls[2]['model']);
+        $this->assertSame($researchModel, $this->aiCalls[3]['model']);
+        $this->assertSame($researchModel, $this->aiCalls[4]['model']);
+    }
+
+    public function test_layer1_unparseable_batch_is_retried_then_recorded_as_failed(): void
+    {
+        config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_attempts', 2);
+
+        $url = 'https://a.example';
+        $pages = [$url => $this->page('Page A', $url, str_repeat('x', 1200).' body')];
+
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                return count($this->aiCalls) === 1
+                    ? $this->filterOk([1])
+                    : null; // final summary never runs: every notes call failed
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(function (array $jobs) {
+            $results = [];
+
+            foreach ($jobs as $job) {
+                $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+                $results[$job['key']] = null; // unparseable output every attempt
+            }
+
+            return $results;
+        });
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher($pages));
+        $result = $agent->research($this->criteria(), $this->payload([$this->candidate('Example Corp', $url)]));
+
+        $this->assertSame(ResearchOutcome::Indeterminate, $result->outcome);
+        // filter + 2 note_attempts rounds of the same batch
+        $this->assertCount(3, $this->aiCalls);
+    }
+
+    // --------------------------------------------- feature 011: extraction
+
+    /**
+     * Run one forced layer-1 pipeline (a page too big for a single call) with
+     * the notes call returning `$facts` verbatim, and return the research result.
+     */
+    private function runNotesExtraction(string $facts): ResearchResult
+    {
+        config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_attempts', 1);
+
+        $url = 'https://example.com';
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                return count($this->aiCalls) === 1
+                    ? $this->filterOk([1])
+                    : $this->summaryOk('Extracted profile: revenue $48.2M; about 1,200 employees; founded 2013; office in London, UK.');
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(function (array $jobs) use ($facts) {
+            $results = [];
+
+            foreach ($jobs as $job) {
+                $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+                $results[$job['key']] = ['notes' => [['id' => 1, 'relevant' => true, 'facts' => $facts]]];
+            }
+
+            return $results;
+        });
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher([
+            $url => $this->page('About', $url, str_repeat('x', 1200).' body'),
+        ]));
+
+        return $agent->research($this->criteria(), $this->payload([$this->candidate('Example Corp', $url)]));
+    }
+
+    public function test_layer1_notes_keep_verbatim_figures_beyond_the_old_800_char_cap(): void
+    {
+        // The figures sit past character 800 of the note (feature 011).
+        $longFacts = str_repeat('detail ', 120).'revenue $48.2M; about 1,200 employees; founded 2013; office in London, UK.';
+
+        $result = $this->runNotesExtraction($longFacts);
+
+        $this->assertSame(ResearchOutcome::Completed, $result->outcome);
+        $this->assertStringContainsString('$48.2M', $result->summary);
+        $this->assertStringContainsString('1,200 employees', $result->summary);
+
+        // The final-call input must carry the full extraction, figures included.
+        $final = end($this->aiCalls);
+        $this->assertStringContainsString('$48.2M', (string) $final['user']);
+        $this->assertStringContainsString('1,200 employees', (string) $final['user']);
+        $this->assertStringContainsString('founded 2013', (string) $final['user']);
+    }
+
+    public function test_parse_notes_retains_extractions_longer_than_800_chars(): void
+    {
+        // 'information ' x 70 = 840 chars, so 'founded 2013' sits past 800.
+        $longFacts = str_repeat('information ', 70).'revenue $48.2M; about 1,200 employees; founded 2013.';
+
+        $this->runNotesExtraction($longFacts);
+
+        $final = end($this->aiCalls);
+        $this->assertStringContainsString('founded 2013', (string) $final['user']);
+        $this->assertStringContainsString('$48.2M', (string) $final['user']);
+    }
+
+    public function test_notes_system_prompt_extracts_without_a_word_cap(): void
+    {
+        $this->runNotesExtraction('Extracted facts about Example Corp.');
+
+        $system = mb_strtolower((string) $this->aiCalls[1]['system']);
+
+        $this->assertStringNotContainsString('120 words', $system);
+        $this->assertStringContainsString('extract', $system);
+        $this->assertStringContainsString('verbatim', $system);
+    }
+
+    public function test_summary_system_prompt_extracts_instead_of_condensing(): void
+    {
+        $url = 'https://example.com';
+        $agent = $this->makeAgent(
+            [$this->filterOk([1]), $this->summaryOk('Extracted profile.')],
+            [$url => $this->page('About', $url)],
+        );
+
+        $agent->research($this->criteria(), $this->payload([$this->candidate('Example Corp', $url)]));
+
+        $system = mb_strtolower((string) $this->aiCalls[1]['system']);
+
+        $this->assertStringNotContainsString('concise', $system);
+        $this->assertStringContainsString('extract', $system);
+        $this->assertStringContainsString('verbatim', $system);
+    }
+
+    public function test_layer2_extraction_passes_cover_every_note(): void
+    {
+        // The notes exceed the per-call cap, forcing layer 2 to run in passes.
+        config()->set('web_research.summary_max_input_chars', 2000);
+        config()->set('web_research.note_attempts', 1);
+
+        $urls = ['https://a.example', 'https://b.example', 'https://c.example'];
+        $markers = ['markerAlpha', 'markerBeta', 'markerGamma'];
+        $pages = [];
+        $candidates = [];
+
+        foreach ($urls as $i => $url) {
+            $pages[$url] = $this->page('Page '.$i, $url, str_repeat('x', 1200).' body');
+            $candidates[] = $this->candidate('Example Corp '.$i, $url);
+        }
+
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                if (count($this->aiCalls) === 1) {
+                    return $this->filterOk([1, 2, 3]);
+                }
+
+                // Echo what this pass received, so the merged result proves
+                // every note's content reached at least one layer-2 pass.
+                return ['summary' => (string) $user, 'sources' => [], 'limitations' => null];
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(function (array $jobs) use ($markers) {
+            $results = [];
+
+            foreach ($jobs as $job) {
+                $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+                $index = (int) $job['key'];
+                $results[$job['key']] = [
+                    'notes' => [['id' => 1, 'relevant' => true, 'facts' => $markers[$index].' '.str_repeat('y', 3000)]],
+                ];
+            }
+
+            return $results;
+        });
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher($pages));
+        $result = $agent->research($this->criteria(), $this->payload($candidates));
+
+        $this->assertSame(ResearchOutcome::Completed, $result->outcome);
+
+        foreach ($markers as $marker) {
+            $this->assertStringContainsString($marker, $result->summary, "Layer-2 dropped {$marker}.");
+        }
+
+        // filter + 3 notes + 3 extraction passes
+        $this->assertCount(7, $this->aiCalls);
+    }
+
+    public function test_extraction_prompt_retains_conflicting_statements(): void
+    {
+        $url = 'https://example.com';
+        $agent = $this->makeAgent(
+            [
+                $this->filterOk([1]),
+                $this->summaryOk('One document says founded 2013; another says founded 2011.'),
+            ],
+            [$url => $this->page('About', $url)],
+        );
+
+        $result = $agent->research($this->criteria(), $this->payload([$this->candidate('Example Corp', $url)]));
+
+        $this->assertSame(ResearchOutcome::Completed, $result->outcome);
+        $this->assertStringContainsString('2013', $result->summary);
+        $this->assertStringContainsString('2011', $result->summary);
+
+        $system = mb_strtolower((string) $this->aiCalls[1]['system']);
+        $this->assertStringNotContainsString('concise', $system);
+        $this->assertStringContainsString('conflict', $system);
+    }
+
+    public function test_layer2_partial_run_names_the_failed_batch_gap(): void
+    {
+        config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_attempts', 1);
+
+        $good = 'https://good.example';
+        $bad = 'https://bad.example';
+
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                return count($this->aiCalls) === 1
+                    ? $this->filterOk([1, 2])
+                    : $this->summaryOk('Extraction from the good batch.');
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(function (array $jobs) {
+            $results = [];
+
+            foreach ($jobs as $job) {
+                $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+
+                $results[$job['key']] = $job['key'] === '0'
+                    ? ['notes' => [['id' => 1, 'relevant' => true, 'facts' => 'Good page facts.']]]
+                    : null; // second batch fails on its only attempt
+            }
+
+            return $results;
+        });
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher([
+            $good => $this->page('Good', $good, str_repeat('x', 1200).' body'),
+            $bad => $this->page('Bad', $bad, str_repeat('x', 1200).' body'),
+        ]));
+        $result = $agent->research($this->criteria(), $this->payload([
+            $this->candidate('Good', $good),
+            $this->candidate('Bad', $bad),
+        ]));
+
+        $this->assertSame(ResearchOutcome::Partial, $result->outcome);
+        $this->assertStringContainsString('1 batch(es) failed', (string) $result->limitations);
+        $this->assertSame([['title' => 'Good', 'url' => $good]], $result->sources);
     }
 }

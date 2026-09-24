@@ -16,7 +16,7 @@ abstract class TestCase extends BaseTestCase
 
         // AiCallingService short-circuits on an empty key BEFORE any HTTP call,
         // so feature tests must supply one (the request itself is faked).
-        config()->set('services.zai.key', 'test-zai-key');
-        config()->set('services.zai.model', 'test-model');
+        config()->set('services.ai.key', 'test-ai-key');
+        config()->set('services.ai.model', 'test-model');
     }
 }

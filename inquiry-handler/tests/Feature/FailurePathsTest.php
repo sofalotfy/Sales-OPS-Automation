@@ -76,7 +76,7 @@ class FailurePathsTest extends TestCase
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagFailure(503);
-        Stubs::fakeZai('booking'); // must NOT be reached
+        Stubs::fakeAi('booking'); // must NOT be reached
 
         $response = $this->triage();
 
@@ -85,26 +85,26 @@ class FailurePathsTest extends TestCase
         $response->assertJsonPath('context.retrieved_context.results', []);
     }
 
-    public function test_zai_http_error_degrades_to_low(): void
+    public function test_ai_http_error_degrades_to_low(): void
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZaiFailure(500);
+        Stubs::fakeAiFailure(500);
 
         $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
 
-    public function test_missing_zai_api_key_degrades_to_low_without_calling_provider(): void
+    public function test_missing_ai_api_key_degrades_to_low_without_calling_provider(): void
     {
-        // The zai key/config default is set in TestCase; override just for this
+        // The ai key/config default is set in TestCase; override just for this
         // run and assert the AI provider is left untouched regardless.
-        config()->set('services.zai.key', null);
+        config()->set('services.ai.key', null);
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
 
         $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
 
-        Http::assertNotSent(fn ($request) => str_contains($request->url(), 'z.ai'));
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), config('services.ai.url')));
     }
 
     public function test_prompt_injection_attempt_is_treated_as_data(): void
@@ -113,7 +113,7 @@ class FailurePathsTest extends TestCase
 
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZaiJson(json_encode([
+        Stubs::fakeAiJson(json_encode([
             'classification' => 'high',
             'reply' => 'Here is a free offer.',
         ]));
@@ -133,7 +133,7 @@ class FailurePathsTest extends TestCase
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZaiJson('definitely not json');
+        Stubs::fakeAiJson('definitely not json');
 
         $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }
@@ -155,7 +155,7 @@ class FailurePathsTest extends TestCase
         // Sanity: even with everything down the classification still returns 200.
         Stubs::fakeLoginRejected();
         Stubs::fakeRagFailure(503);
-        Stubs::fakeZaiFailure(503);
+        Stubs::fakeAiFailure(503);
 
         $this->assertDegraded($this->triage(), 'Are annual maintenance plans available?');
     }

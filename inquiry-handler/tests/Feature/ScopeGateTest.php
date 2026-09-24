@@ -183,7 +183,7 @@ class ScopeGateTest extends TestCase
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZaiFailure(500);
+        Stubs::fakeAiFailure(500);
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
@@ -193,7 +193,7 @@ class ScopeGateTest extends TestCase
 
     public function test_missing_ai_key_fails_open_to_classification(): void
     {
-        config(['services.zai.key' => '']);
+        config(['services.ai.key' => '']);
 
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
@@ -208,7 +208,7 @@ class ScopeGateTest extends TestCase
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZaiJson('this is not json');
+        Stubs::fakeAiJson('this is not json');
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
@@ -220,7 +220,7 @@ class ScopeGateTest extends TestCase
     {
         Stubs::fakeLoginOk();
         Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeZaiJson(json_encode(['reason' => 'no verdict here']));
+        Stubs::fakeAiJson(json_encode(['reason' => 'no verdict here']));
 
         $this->postJson('/inquiry/triage', $this->payload('Do you sell CRM automation?'))
             ->assertOk()
