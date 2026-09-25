@@ -56,6 +56,36 @@ class InquiryHandlerApiClient
         return $this->authenticatedRequest()->get("/admin/classification-results/{$id}");
     }
 
+    /** Every catalog sector (GET /admin/sectors, contracts/sectors-admin.md). */
+    public function getIndustrySectors(): Response
+    {
+        return $this->authenticatedRequest()->get('/admin/sectors');
+    }
+
+    /** Create a sector (POST /admin/sectors). */
+    public function createIndustrySector(string $name, int $rating): Response
+    {
+        return $this->authenticatedRequest()->post('/admin/sectors', [
+            'name' => $name,
+            'rating' => $rating,
+        ]);
+    }
+
+    /** Update a sector's name/rating (PUT /admin/sectors/{id}). */
+    public function updateIndustrySector(int $id, string $name, int $rating): Response
+    {
+        return $this->authenticatedRequest()->put("/admin/sectors/{$id}", [
+            'name' => $name,
+            'rating' => $rating,
+        ]);
+    }
+
+    /** Hard-delete a sector (DELETE /admin/sectors/{id}). */
+    public function deleteIndustrySector(int $id): Response
+    {
+        return $this->authenticatedRequest()->delete("/admin/sectors/{$id}");
+    }
+
     private function authenticatedRequest(): \Illuminate\Http\Client\PendingRequest
     {
         $request = Http::baseUrl($this->baseUrl())->acceptJson()->timeout(5);

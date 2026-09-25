@@ -10,6 +10,7 @@ use App\WebResearch\WebResearchProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Tests\Feature\Support\PinsCompanySizeCatalog;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -23,12 +24,14 @@ use Tests\TestCase;
  */
 class WebResearchMiddlewareTest extends TestCase
 {
+    use PinsCompanySizeCatalog;
     use RefreshDatabase;
 
     protected function setUp(): void
     {
         parent::setUp();
         config(['web_research.enabled' => true]);
+        $this->pinCompanySizeCatalog();
     }
 
     /** @param callable(array): array $research the provider implementation */

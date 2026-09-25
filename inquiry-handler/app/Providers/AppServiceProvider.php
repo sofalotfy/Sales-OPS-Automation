@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Scoring\CompanySizeFactor;
 use App\Scoring\FactorRegistry;
+use App\Scoring\IndustrySectorFactor;
 use App\WebResearch\Providers\TavilyResearchProvider;
 use App\WebResearch\WebResearchProvider;
 use Illuminate\Support\ServiceProvider;
@@ -24,12 +25,13 @@ class AppServiceProvider extends ServiceProvider
         // Factor catalog is code-registered (FR-004): factors are added one at
         // a time in development by defining a ScoreFactor service and calling
         // add() here (SC-003). `company_size` is the first registered factor
-        // (feature 009) and therefore leads the factor breakdown. Kept as a
-        // singleton so the same list is shared by the triage flow and the
-        // admin factor-settings API.
+        // (feature 009) and therefore leads the factor breakdown; `industry_sector`
+        // (feature 012) follows it. Kept as a singleton so the same list is
+        // shared by the triage flow and the admin factor-settings API.
         $this->app->singleton(FactorRegistry::class, function ($app) {
             $registry = new FactorRegistry;
             $registry->add($app->make(CompanySizeFactor::class));
+            $registry->add($app->make(IndustrySectorFactor::class));
 
             return $registry;
         });

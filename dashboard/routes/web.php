@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClassificationController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\IndustrySectorsController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -38,4 +39,9 @@ Route::middleware('auth.upstream')->group(function () {
     Route::get('/classification', [ClassificationController::class, 'index'])->name('classification.index');
     Route::put('/classification/weights', [ClassificationController::class, 'update'])->name('classification.update');
     Route::get('/classification/{id}', [ClassificationController::class, 'show'])->name('classification.show');
+
+    Route::get('/sectors', [IndustrySectorsController::class, 'index'])->name('sectors.index');
+    Route::post('/sectors', [IndustrySectorsController::class, 'store'])->name('sectors.store');
+    Route::put('/sectors/{id}', [IndustrySectorsController::class, 'update'])->whereNumber('id')->name('sectors.update');
+    Route::delete('/sectors/{id}', [IndustrySectorsController::class, 'destroy'])->whereNumber('id')->name('sectors.destroy');
 });

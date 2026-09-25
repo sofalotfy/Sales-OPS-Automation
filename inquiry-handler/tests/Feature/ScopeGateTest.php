@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\ClassificationResult;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Tests\Feature\Support\PinsCompanySizeCatalog;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -18,12 +19,14 @@ use Tests\TestCase;
  */
 class ScopeGateTest extends TestCase
 {
+    use PinsCompanySizeCatalog;
     use RefreshDatabase;
 
     protected function setUp(): void
     {
         parent::setUp();
         config(['scope_gate.enabled' => true]);
+        $this->pinCompanySizeCatalog();
     }
 
     private function payload(string $message, array $overrides = []): array

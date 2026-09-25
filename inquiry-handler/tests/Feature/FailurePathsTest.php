@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Tests\Feature\Support\PinsCompanySizeCatalog;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -17,7 +18,18 @@ use Tests\TestCase;
  */
 class FailurePathsTest extends TestCase
 {
+    use PinsCompanySizeCatalog;
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Keep the `company_size`-only expectations deterministic: the real
+        // catalog now also contains `industry_sector` (feature 012), whose drop
+        // path would otherwise fill `dropped_factors` in these failure runs.
+        $this->pinCompanySizeCatalog();
+    }
 
     private function triage(string $message = 'Are annual maintenance plans available?'): \Illuminate\Testing\TestResponse
     {

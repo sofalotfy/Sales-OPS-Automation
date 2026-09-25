@@ -46,7 +46,7 @@ class FactorSettingsAdminTest extends TestCase
             ->assertJsonPath('detail', 'Not authenticated.');
     }
 
-    public function test_get_lists_the_registered_company_size_factor_by_default(): void
+    public function test_get_lists_the_registered_factors_by_default(): void
     {
         Stubs::authVerifyOk();
 
@@ -54,6 +54,7 @@ class FactorSettingsAdminTest extends TestCase
             ->assertOk()
             ->assertJsonPath('factors', [
                 ['name' => 'company_size', 'weight' => 1, 'source' => 'default'],
+                ['name' => 'industry_sector', 'weight' => 1, 'source' => 'default'],
             ])
             ->assertJsonPath('stored', []);
     }

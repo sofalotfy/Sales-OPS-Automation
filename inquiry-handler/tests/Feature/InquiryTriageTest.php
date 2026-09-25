@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\ClassificationResult;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Tests\Feature\Support\PinsCompanySizeCatalog;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -19,7 +20,17 @@ use Tests\TestCase;
  */
 class InquiryTriageTest extends TestCase
 {
+    use PinsCompanySizeCatalog;
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Keep the single-factor expectations above deterministic: the real
+        // catalog now also contains `industry_sector` (feature 012).
+        $this->pinCompanySizeCatalog();
+    }
 
     public function test_company_size_scores_zero_without_findings_and_is_first_factor(): void
     {

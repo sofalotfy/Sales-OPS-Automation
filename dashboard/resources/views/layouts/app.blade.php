@@ -28,6 +28,9 @@
                         <a href="{{ route('classification.index') }}" class="font-medium text-slate-200 hover:text-white">
                             Inquiry classification
                         </a>
+                        <a href="{{ route('sectors.index') }}" class="font-medium text-slate-200 hover:text-white">
+                            Industry sectors
+                        </a>
                     </nav>
                 </div>
                 <div class="flex items-center gap-4 text-sm">

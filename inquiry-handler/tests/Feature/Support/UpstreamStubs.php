@@ -180,6 +180,23 @@ class UpstreamStubs
         ]);
     }
 
+    /** Fake AI output for the industry-sector factor (feature 012): sector classifier. */
+    public static function fakeSectorClassification(
+        array $sectors = [],
+        array $considered = [],
+        ?string $reasoning = 'Evidence-based sector fit from the inquiry and findings.',
+    ): void {
+        Http::fake([
+            self::aiUrl() => Http::response([
+                'choices' => [['message' => ['content' => json_encode([
+                    'sectors' => $sectors,
+                    'considered' => $considered,
+                    'reasoning' => $reasoning,
+                ])]]],
+            ], 200),
+        ]);
+    }
+
     /** Scope gate (feature 007): the AI judges the inquiry in scope. */
     public static function fakeScopeAccept(string $reason = 'Within the served scope.'): void
     {

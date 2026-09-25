@@ -204,6 +204,65 @@ class UpstreamStubs
         ]);
     }
 
+    /** A sector item shaped exactly like inquiry-handler's /admin/sectors list. */
+    public static function sector(int $id = 1, string $name = 'Fintech', int $rating = 88): array
+    {
+        return [
+            'id' => $id,
+            'name' => $name,
+            'rating' => $rating,
+            'created_at' => '2026-09-25T10:00:00+00:00',
+            'updated_at' => '2026-09-25T10:00:00+00:00',
+        ];
+    }
+
+    /** Inquiry-handler GET /admin/sectors response. */
+    public static function fakeIndustrySectors(array $items): void
+    {
+        Http::fake([
+            self::inquiryUrl('/admin/sectors') => Http::response(['items' => $items], 200),
+        ]);
+    }
+
+    public static function fakeIndustrySectorsUnavailable(): void
+    {
+        Http::fake([
+            self::inquiryUrl('/admin/sectors') => Http::response(['detail' => 'Catalog store unavailable.'], 503),
+        ]);
+    }
+
+    /** Inquiry-handler POST /admin/sectors → 201 with the created sector. */
+    public static function fakeIndustrySectorCreate(array $sector): void
+    {
+        Http::fake([
+            self::inquiryUrl('/admin/sectors') => Http::response(['sector' => $sector], 201),
+        ]);
+    }
+
+    /** Inquiry-handler PUT /admin/sectors/{id} → 200 with the saved sector. */
+    public static function fakeIndustrySectorUpdate(array $sector): void
+    {
+        Http::fake([
+            self::inquiryUrl('/admin/sectors/*') => Http::response(['sector' => $sector], 200),
+        ]);
+    }
+
+    /** Inquiry-handler DELETE /admin/sectors/{id} → 204. */
+    public static function fakeIndustrySectorDelete(): void
+    {
+        Http::fake([
+            self::inquiryUrl('/admin/sectors/*') => Http::response('', 204),
+        ]);
+    }
+
+    /** Inquiry-handler 422 rejection for a create/update write (detail surfaced). */
+    public static function fakeIndustrySectorRejected(string $detail): void
+    {
+        Http::fake([
+            self::inquiryUrl('/admin/sectors*') => Http::response(['detail' => $detail], 422),
+        ]);
+    }
+
     /** A document summary shaped exactly like a RAG /documents item. */
     public static function document(
         string $id = 'doc-1',
