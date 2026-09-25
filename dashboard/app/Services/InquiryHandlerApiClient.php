@@ -63,20 +63,22 @@ class InquiryHandlerApiClient
     }
 
     /** Create a sector (POST /admin/sectors). */
-    public function createIndustrySector(string $name, int $rating): Response
+    public function createIndustrySector(string $name, int $rating, string $description): Response
     {
         return $this->authenticatedRequest()->post('/admin/sectors', [
             'name' => $name,
             'rating' => $rating,
+            'description' => $description,
         ]);
     }
 
-    /** Update a sector's name/rating (PUT /admin/sectors/{id}). */
-    public function updateIndustrySector(int $id, string $name, int $rating): Response
+    /** Update a sector's name/rating/description (PUT /admin/sectors/{id}). */
+    public function updateIndustrySector(int $id, string $name, int $rating, string $description): Response
     {
         return $this->authenticatedRequest()->put("/admin/sectors/{$id}", [
             'name' => $name,
             'rating' => $rating,
+            'description' => $description,
         ]);
     }
 

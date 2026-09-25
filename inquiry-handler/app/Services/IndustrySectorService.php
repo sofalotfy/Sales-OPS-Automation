@@ -46,17 +46,33 @@ class IndustrySectorService
         return $map;
     }
 
-    public function create(string $name, int $rating): IndustrySector
+    /**
+     * @return array<string, string>  mapped name → description, for the factor's
+     *                                classifier prompt (empty string when unset)
+     */
+    public function activeDescriptions(): array
+    {
+        $map = [];
+
+        foreach ($this->all() as $sector) {
+            $map[$sector->name] = trim((string) $sector->description);
+        }
+
+        return $map;
+    }
+
+    public function create(string $name, int $rating, string $description): IndustrySector
     {
         $this->assertNameAvailable(trim($name), null);
 
         return IndustrySector::query()->create([
             'name' => trim($name),
             'rating' => $rating,
+            'description' => trim($description),
         ]);
     }
 
-    public function update(int $id, string $name, int $rating): IndustrySector
+    public function update(int $id, string $name, int $rating, string $description): IndustrySector
     {
         $sector = IndustrySector::query()->findOrFail($id);
 
@@ -65,6 +81,7 @@ class IndustrySectorService
         $sector->update([
             'name' => trim($name),
             'rating' => $rating,
+            'description' => trim($description),
         ]);
 
         return $sector->refresh();

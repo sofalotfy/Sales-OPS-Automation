@@ -205,12 +205,17 @@ class UpstreamStubs
     }
 
     /** A sector item shaped exactly like inquiry-handler's /admin/sectors list. */
-    public static function sector(int $id = 1, string $name = 'Fintech', int $rating = 88): array
-    {
+    public static function sector(
+        int $id = 1,
+        string $name = 'Fintech',
+        int $rating = 88,
+        string $description = 'Payments, neobanks, wealth-tech, lending, crypto and insurtech platforms',
+    ): array {
         return [
             'id' => $id,
             'name' => $name,
             'rating' => $rating,
+            'description' => $description,
             'created_at' => '2026-09-25T10:00:00+00:00',
             'updated_at' => '2026-09-25T10:00:00+00:00',
         ];

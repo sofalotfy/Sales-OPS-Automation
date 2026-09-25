@@ -26,8 +26,8 @@ class IndustrySectorsTest extends TestCase
     {
         $this->signIn();
         UpstreamStubs::fakeIndustrySectors([
-            UpstreamStubs::sector(id: 1, name: 'E-commerce & Retail', rating: 92),
-            UpstreamStubs::sector(id: 2, name: 'Fintech', rating: 88),
+            UpstreamStubs::sector(id: 1, name: 'E-commerce & Retail', rating: 92, description: 'Online stores, marketplaces and retail brands selling to consumers.'),
+            UpstreamStubs::sector(id: 2, name: 'Fintech', rating: 88, description: 'Payments, neobanks, wealth-tech, lending and insurtech platforms.'),
         ]);
 
         $this->get(route('sectors.index'))
@@ -35,6 +35,7 @@ class IndustrySectorsTest extends TestCase
             ->assertSee('Industry sectors')
             ->assertSee('E-commerce & Retail')
             ->assertSee('Fintech')
+            ->assertSee('wealth-tech')
             ->assertSee('2 sectors');
     }
 
@@ -83,15 +84,19 @@ class IndustrySectorsTest extends TestCase
     public function test_store_creates_a_sector_and_flashes_status(): void
     {
         $this->signIn();
-        UpstreamStubs::fakeIndustrySectorCreate(UpstreamStubs::sector(id: 3, name: 'Pharma Analytics', rating: 66));
+        UpstreamStubs::fakeIndustrySectorCreate(UpstreamStubs::sector(id: 3, name: 'Pharma Analytics', rating: 66, description: 'Adverse-event monitoring for drug makers.'));
 
         $this->from(route('sectors.index'))
-            ->post(route('sectors.store'), ['name' => '  Pharma Analytics  ', 'rating' => 66])
+            ->post(route('sectors.store'), [
+                'name' => '  Pharma Analytics  ',
+                'rating' => 66,
+                'description' => '  Adverse-event monitoring for drug makers.  ',
+            ])
             ->assertRedirect(route('sectors.index'))
             ->assertSessionHas('status', 'Sector created.');
 
-        // The name is trimmed before it leaves the dashboard.
-        Http::assertSent(fn (Request $request) => $request['name'] === 'Pharma Analytics');
+        Http::assertSent(fn (Request $request) => $request['name'] === 'Pharma Analytics'
+            && $request['description'] === 'Adverse-event monitoring for drug makers.');
     }
 
     public function test_store_surfaces_validation_detail(): void
@@ -108,10 +113,14 @@ class IndustrySectorsTest extends TestCase
     public function test_update_edits_a_sector(): void
     {
         $this->signIn();
-        UpstreamStubs::fakeIndustrySectorUpdate(UpstreamStubs::sector(id: 1, name: 'E-commerce & Marketplaces', rating: 91));
+        UpstreamStubs::fakeIndustrySectorUpdate(UpstreamStubs::sector(id: 1, name: 'E-commerce & Marketplaces', rating: 91, description: 'Online marketplaces and first-party retail brands.'));
 
         $this->from(route('sectors.index'))
-            ->put(route('sectors.update', 1), ['name' => 'E-commerce & Marketplaces', 'rating' => 91])
+            ->put(route('sectors.update', 1), [
+                'name' => 'E-commerce & Marketplaces',
+                'rating' => 91,
+                'description' => 'Online marketplaces and first-party retail brands.',
+            ])
             ->assertRedirect(route('sectors.index'))
             ->assertSessionHas('status', 'Sector updated.');
     }

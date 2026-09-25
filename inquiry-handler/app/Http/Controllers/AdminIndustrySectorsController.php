@@ -15,9 +15,9 @@ use Throwable;
  * Admin industry-sectors API (contracts/sectors-admin.md, feature 012 US3),
  * gated by VerifyUpstreamToken like the factor-settings endpoints.
  *
- * GET lists the catalog; POST creates; PUT updates name/rating; DELETE
- * hard-removes a sector (historical classifications keep the frozen name in
- * their factor_scores reasoning — only future runs are affected, FR-010).
+ * GET lists the catalog; POST creates; PUT updates name/rating/description;
+ * DELETE hard-removes a sector (historical classifications keep the frozen name
+ * in their factor_scores reasoning — only future runs are affected, FR-010).
  * Validation messages follow the contract verbatim; DB-layer failures surface
  * as 503 "Catalog store unavailable." while unknown ids surface as 404.
  */
@@ -40,10 +40,10 @@ class AdminIndustrySectorsController extends Controller
 
     public function store(Request $request): JsonResponse
     {
-        [$name, $rating] = $this->validatedPayload($request);
+        [$name, $rating, $description] = $this->validatedPayload($request);
 
         try {
-            $sector = $this->sectors->create($name, $rating);
+            $sector = $this->sectors->create($name, $rating, $description);
         } catch (InvalidArgumentException $e) {
             return $this->invalid($e->getMessage());
         } catch (Throwable $e) {
@@ -57,10 +57,10 @@ class AdminIndustrySectorsController extends Controller
 
     public function update(Request $request, int $id): JsonResponse
     {
-        [$name, $rating] = $this->validatedPayload($request);
+        [$name, $rating, $description] = $this->validatedPayload($request);
 
         try {
-            $sector = $this->sectors->update($id, $name, $rating);
+            $sector = $this->sectors->update($id, $name, $rating, $description);
         } catch (ModelNotFoundException) {
             return $this->notFound();
         } catch (InvalidArgumentException $e) {
@@ -90,15 +90,17 @@ class AdminIndustrySectorsController extends Controller
     }
 
     /**
-     * Validate the shared name/rating payload; contract-verbatim 422 messages.
+     * Validate the shared name/rating/description payload; contract-verbatim
+     * 422 messages.
      *
-     * @return array{0: string, 1: int}
+     * @return array{0: string, 1: int, 2: string}
      */
     private function validatedPayload(Request $request): array
     {
         $validator = Validator::make($request->json()->all(), [
             'name' => ['required', 'string', 'max:100'],
             'rating' => ['required', 'integer', 'between:0,100'],
+            'description' => ['required', 'string', 'max:500'],
         ], [
             'name.required' => 'Name is required.',
             'name.string' => 'Name is required.',
@@ -106,6 +108,9 @@ class AdminIndustrySectorsController extends Controller
             'rating.required' => 'Rating must be an integer between 0 and 100.',
             'rating.integer' => 'Rating must be an integer between 0 and 100.',
             'rating.between' => 'Rating must be an integer between 0 and 100.',
+            'description.required' => 'A description is required.',
+            'description.string' => 'A description is required.',
+            'description.max' => 'Description must be 500 characters or fewer.',
         ]);
 
         if ($validator->fails()) {
@@ -113,12 +118,17 @@ class AdminIndustrySectorsController extends Controller
         }
 
         $name = trim((string) $request->json('name'));
+        $description = trim((string) $request->json('description'));
 
         if ($name === '') {
             $this->abort422('Name is required.');
         }
 
-        return [$name, (int) $request->json('rating')];
+        if ($description === '') {
+            $this->abort422('A description is required.');
+        }
+
+        return [$name, (int) $request->json('rating'), $description];
     }
 
     private function abort422(string $message): never

@@ -165,6 +165,30 @@ class IndustrySectorFactorTest extends TestCase
         });
     }
 
+    public function test_prompt_lists_sectors_with_their_descriptions(): void
+    {
+        $this->fakeSectorOutput(['Fintech']);
+
+        $this->makeFactor()->score(self::INQUIRY, $this->context());
+
+        Http::assertSent(function (Request $request) {
+            if ($request->url() !== Stubs::aiUrl()) {
+                return true;
+            }
+
+            $prompt = (string) ($request->data()['messages'][1]['content'] ?? '');
+
+            $this->assertStringContainsString(
+                'wealth-tech',
+                $prompt,
+                'The classifier prompt must expose each sector description so it can reason about fit.',
+            );
+            $this->assertStringContainsString('Online stores', $prompt, 'Seeded E-commerce description missing from the prompt.');
+
+            return true;
+        });
+    }
+
     // =========================================================================
     // US2 — unclassifiable inquiry → notify + throw
     // =========================================================================

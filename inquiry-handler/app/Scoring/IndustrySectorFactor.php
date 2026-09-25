@@ -32,6 +32,9 @@ final class IndustrySectorFactor implements ScoreFactor
 
     private const EXCERPT_LIMIT = 2000;
 
+    /** Safety clamp for catalog descriptions; the admin API already caps at 500. */
+    private const PROMPT_DESCRIPTION_LIMIT = 500;
+
     public function __construct(
         private readonly IndustrySectorService $sectors,
         private readonly AiCallingService $ai,
@@ -314,9 +317,15 @@ PROMPT;
             $disambiguation[] = $country;
         }
 
+        $descriptions = $this->sectors->activeDescriptions();
+
         $lines = [];
         foreach ($catalog as $name => $rating) {
-            $lines[] = "- {$name} ({$rating})";
+            $description = mb_substr((string) ($descriptions[$name] ?? ''), 0, self::PROMPT_DESCRIPTION_LIMIT);
+
+            $lines[] = $description === ''
+                ? "- {$name} ({$rating})"
+                : "- {$name} ({$rating}): {$description}";
         }
 
         $linesText = $lines === [] ? '  (none)' : implode("\n", $lines);
@@ -336,7 +345,7 @@ Public research findings:
 
 Company context ({$disambiguationText})
 
-Catalog (name → editorial rating):
+Catalog (name → rating, and what each sector covers):
 {$linesText}
 
 Classify the inquiry's industry sector per the rules and return the JSON.

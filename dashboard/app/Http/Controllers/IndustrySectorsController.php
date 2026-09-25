@@ -52,6 +52,7 @@ class IndustrySectorsController extends Controller
         $response = $this->call(fn () => app(InquiryHandlerApiClient::class)->createIndustrySector(
             (string) $request->string('name')->trim(),
             (int) $request->integer('rating'),
+            (string) $request->string('description')->trim(),
         ));
 
         return $this->redirectFor($request, $response, 'Sector created.');
@@ -63,6 +64,7 @@ class IndustrySectorsController extends Controller
             $id,
             (string) $request->string('name')->trim(),
             (int) $request->integer('rating'),
+            (string) $request->string('description')->trim(),
         ));
 
         return $this->redirectFor($request, $response, 'Sector updated.');

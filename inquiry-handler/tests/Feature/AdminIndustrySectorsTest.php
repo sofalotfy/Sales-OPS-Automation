@@ -56,6 +56,12 @@ class AdminIndustrySectorsTest extends TestCase
             ->assertJsonPath('items.0.rating', 92)
             ->assertJsonPath('items.1.name', 'SaaS & Software');
 
+        $this->assertStringContainsString(
+            'Online stores',
+            $response->json('items.0.description'),
+            'Seeded sectors must carry a description for the classifier.',
+        );
+
         $ratings = array_column($response->json('items'), 'rating');
         $sorted = $ratings;
         rsort($sorted);
@@ -66,15 +72,21 @@ class AdminIndustrySectorsTest extends TestCase
     {
         Stubs::authVerifyOk();
 
-        $response = $this->postJson('/admin/sectors', ['name' => 'Pharmacovigilance', 'rating' => 61], $this->bearer());
+        $response = $this->postJson('/admin/sectors', [
+            'name' => 'Pharmacovigilance',
+            'rating' => 61,
+            'description' => 'Adverse-event monitoring and signal-detection services for drug makers.',
+        ], $this->bearer());
 
         $response->assertStatus(201)
             ->assertJsonPath('sector.name', 'Pharmacovigilance')
-            ->assertJsonPath('sector.rating', 61);
+            ->assertJsonPath('sector.rating', 61)
+            ->assertJsonPath('sector.description', 'Adverse-event monitoring and signal-detection services for drug makers.');
 
         $this->assertDatabaseHas('industry_sectors', [
             'name' => 'Pharmacovigilance',
             'rating' => 61,
+            'description' => 'Adverse-event monitoring and signal-detection services for drug makers.',
         ]);
     }
 
@@ -83,16 +95,22 @@ class AdminIndustrySectorsTest extends TestCase
         Stubs::authVerifyOk();
         $sector = IndustrySector::query()->where('name', 'E-commerce & Retail')->first();
 
-        $response = $this->putJson("/admin/sectors/{$sector->id}", ['name' => 'E-commerce & Marketplaces', 'rating' => 91], $this->bearer());
+        $response = $this->putJson("/admin/sectors/{$sector->id}", [
+            'name' => 'E-commerce & Marketplaces',
+            'rating' => 91,
+            'description' => 'Online marketplaces and first-party retail brands selling to consumers.',
+        ], $this->bearer());
 
         $response->assertOk()
             ->assertJsonPath('sector.name', 'E-commerce & Marketplaces')
-            ->assertJsonPath('sector.rating', 91);
+            ->assertJsonPath('sector.rating', 91)
+            ->assertJsonPath('sector.description', 'Online marketplaces and first-party retail brands selling to consumers.');
 
         $this->assertDatabaseHas('industry_sectors', [
             'id' => $sector->id,
             'name' => 'E-commerce & Marketplaces',
             'rating' => 91,
+            'description' => 'Online marketplaces and first-party retail brands selling to consumers.',
         ]);
     }
 
@@ -114,7 +132,7 @@ class AdminIndustrySectorsTest extends TestCase
     {
         Stubs::authVerifyOk();
 
-        $this->postJson('/admin/sectors', ['name' => '   ', 'rating' => 50], $this->bearer())
+        $this->postJson('/admin/sectors', ['name' => '   ', 'rating' => 50, 'description' => 'Any old sector.'], $this->bearer())
             ->assertStatus(422)
             ->assertJsonPath('detail', 'Name is required.');
     }
@@ -123,7 +141,7 @@ class AdminIndustrySectorsTest extends TestCase
     {
         Stubs::authVerifyOk();
 
-        $this->postJson('/admin/sectors', ['name' => str_repeat('a', 101), 'rating' => 50], $this->bearer())
+        $this->postJson('/admin/sectors', ['name' => str_repeat('a', 101), 'rating' => 50, 'description' => 'Any old sector.'], $this->bearer())
             ->assertStatus(422)
             ->assertJsonPath('detail', 'Name must be 100 characters or fewer.');
     }
@@ -132,7 +150,7 @@ class AdminIndustrySectorsTest extends TestCase
     {
         Stubs::authVerifyOk();
 
-        $this->postJson('/admin/sectors', ['name' => 'FINTECH', 'rating' => 50], $this->bearer())
+        $this->postJson('/admin/sectors', ['name' => 'FINTECH', 'rating' => 50, 'description' => 'Payments and wealth-tech platforms.'], $this->bearer())
             ->assertStatus(422)
             ->assertJsonPath('detail', 'A sector with that name already exists.');
     }
@@ -142,8 +160,26 @@ class AdminIndustrySectorsTest extends TestCase
         Stubs::authVerifyOk();
         $sector = IndustrySector::query()->where('name', 'Fintech')->first();
 
-        $this->putJson("/admin/sectors/{$sector->id}", ['name' => 'Fintech', 'rating' => 90], $this->bearer())
+        $this->putJson("/admin/sectors/{$sector->id}", ['name' => 'Fintech', 'rating' => 90, 'description' => 'Payments and wealth-tech platforms.'], $this->bearer())
             ->assertOk();
+    }
+
+    public function test_blank_description_returns_422(): void
+    {
+        Stubs::authVerifyOk();
+
+        $this->postJson('/admin/sectors', ['name' => 'Some Sector', 'rating' => 50, 'description' => '   '], $this->bearer())
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'A description is required.');
+    }
+
+    public function test_too_long_description_returns_422(): void
+    {
+        Stubs::authVerifyOk();
+
+        $this->postJson('/admin/sectors', ['name' => 'Some Sector', 'rating' => 50, 'description' => str_repeat('b', 501)], $this->bearer())
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'Description must be 500 characters or fewer.');
     }
 
     public function test_rating_outside_0_100_returns_422(): void
@@ -151,7 +187,7 @@ class AdminIndustrySectorsTest extends TestCase
         Stubs::authVerifyOk();
 
         foreach ([-1, 101] as $rating) {
-            $this->postJson('/admin/sectors', ['name' => 'Some Sector', 'rating' => $rating], $this->bearer())
+            $this->postJson('/admin/sectors', ['name' => 'Some Sector', 'rating' => $rating, 'description' => 'Any old sector.'], $this->bearer())
                 ->assertStatus(422)
                 ->assertJsonPath('detail', 'Rating must be an integer between 0 and 100.');
         }
@@ -161,7 +197,7 @@ class AdminIndustrySectorsTest extends TestCase
     {
         Stubs::authVerifyOk();
 
-        $this->postJson('/admin/sectors', ['name' => 'Some Sector', 'rating' => 10.5], $this->bearer())
+        $this->postJson('/admin/sectors', ['name' => 'Some Sector', 'rating' => 10.5, 'description' => 'Any old sector.'], $this->bearer())
             ->assertStatus(422)
             ->assertJsonPath('detail', 'Rating must be an integer between 0 and 100.');
     }
@@ -172,7 +208,7 @@ class AdminIndustrySectorsTest extends TestCase
     {
         Stubs::authVerifyOk();
 
-        $this->putJson('/admin/sectors/99999', ['name' => 'Nope', 'rating' => 50], $this->bearer())
+        $this->putJson('/admin/sectors/99999', ['name' => 'Nope', 'rating' => 50, 'description' => 'Any old sector.'], $this->bearer())
             ->assertStatus(404)
             ->assertJsonPath('detail', 'Sector not found.');
     }
@@ -193,7 +229,7 @@ class AdminIndustrySectorsTest extends TestCase
         Stubs::authVerifyOk();
         Schema::drop('industry_sectors');
 
-        $this->postJson('/admin/sectors', ['name' => 'Ghost Sector', 'rating' => 50], $this->bearer())
+        $this->postJson('/admin/sectors', ['name' => 'Ghost Sector', 'rating' => 50, 'description' => 'Any old sector.'], $this->bearer())
             ->assertStatus(503)
             ->assertJsonPath('detail', 'Catalog store unavailable.');
     }
