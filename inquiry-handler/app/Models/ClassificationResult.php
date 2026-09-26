@@ -19,7 +19,7 @@ use Illuminate\Database\Eloquent\Model;
  *
  * For synchronous (console) runs the row is created and completed in one pass,
  * so it is written with `status = succeeded` directly. For CRM runs (feature
- * 013) the row is created `queued` by POST /inquiry/enqueue, moves to
+ * 013) the row is created `queued` by POST /inquiry/triage, moves to
  * `processing` when a worker picks it up, and lands in `succeeded` or `failed`.
  * `campaign_id` + `lead_id` carry the CRM's idempotency key (unique pair;
  * Postgres NULLs are distinct, so sync rows never collide).

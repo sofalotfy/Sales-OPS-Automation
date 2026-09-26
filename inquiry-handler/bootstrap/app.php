@@ -1,14 +1,9 @@
 <?php
 
-use App\Http\Middleware\BeginInquiryRun;
-use App\Http\Middleware\ScopeGateMiddleware;
 use App\Http\Middleware\VerifyCrmClient;
-use App\Http\Middleware\WebResearchMiddleware;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
-use Illuminate\Http\Exceptions\ThrottleRequestsException;
-use Illuminate\Http\Request;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -34,13 +29,11 @@ return Application::configure(basePath: dirname(__DIR__))
             fn ($request) => $request->is('inquiry/*'),
         ]);
 
-        // The sync chain opens the run row first (run.begin), then enriches it
-        // with web research before the scope screen. The CRM ingest surface
-        // authenticates via the shared X-CRM-Key credential.
+        // The pipeline runs in the Redis worker now, so there is no per-request
+        // stage middleware left to alias: ProcessTriageJob calls the research,
+        // scope and scoring stages directly. The inquiry surface authenticates
+        // via the shared X-CRM-Key credential.
         $middleware->alias([
-            'run.begin' => BeginInquiryRun::class,
-            'scope.gate' => ScopeGateMiddleware::class,
-            'web.research' => WebResearchMiddleware::class,
             'crm.key' => VerifyCrmClient::class,
         ]);
     })
@@ -48,12 +41,4 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn ($request) => $request->is('inquiry/*') || $request->expectsJson(),
         );
-
-        // Contracted 429 envelope for the CRM ingest surface
-        // (contracts/crm-ingest-web.md).
-        $exceptions->render(function (ThrottleRequestsException $e, Request $request) {
-            if ($request->is('inquiry/*')) {
-                return response()->json(['detail' => 'Too Many Requests'], 429);
-            }
-        });
     })->create();

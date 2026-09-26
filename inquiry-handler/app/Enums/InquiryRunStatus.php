@@ -4,7 +4,7 @@ namespace App\Enums;
 
 /**
  * Lifecycle of one run on the classification log (feature 013,
- * data-model.md). The row is created `queued` by POST /inquiry/enqueue (for
+ * data-model.md). The row is created `queued` by POST /inquiry/triage (for
  * concurrent CRM runs) or as soon as a synchronous /inquiry/triage request is
  * accepted, then advances through each pipeline stage as its data lands:
  *

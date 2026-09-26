@@ -111,10 +111,6 @@ return [
     'booking_url' => env('BOOKING_URL'),
 
     // Shared credential the CRM presents as X-CRM-Key (feature 013 US1; key
-    // from env only, FR-011). Empty value tight-shuts the CRM surface.
+    // from env only, FR-011). Empty value tight-shuts the inquiry surface.
     'crm_key' => env('CRM_API_KEY'),
-    // Per-key rate limit (requests/minute) for the CRM ingest surface,
-    // enforced via throttle:crm → Redis (contracts/crm-ingest-web.md).
-    'crm_rate_limit' => max(1, (int) env('CRM_RATE_MAX_PER_MIN', 120)),
-
 ];

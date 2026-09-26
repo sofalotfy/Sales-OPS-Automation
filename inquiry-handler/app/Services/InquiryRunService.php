@@ -19,7 +19,7 @@ use Throwable;
  * (`final_score`, `classification`, `factor_scores`, ...) are still written
  * exactly once, at completion — the audit invariant is preserved.
  *
- * The same service backs both paths: POST /inquiry/enqueue + ProcessTriageJob
+ * The same service backs both paths: POST /inquiry/triage + ProcessTriageJob
  * (async) and the existing POST /inquiry/triage chain (sync, where
  * BeginInquiryRun creates the row early and the middlewares + triage service
  * call back into this service to advance it).

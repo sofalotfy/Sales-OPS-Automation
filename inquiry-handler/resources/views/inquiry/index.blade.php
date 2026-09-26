@@ -66,6 +66,12 @@
 
 @push('scripts')
 <script>
+    // The inquiry surface is share-key authenticated (`crm.key` middleware).
+    // This console is a local manual-testing aid served by the same app, so it
+    // presents the key from server-side config instead of making the tester
+    // paste it. It is never rendered for an unauthenticated caller of the API.
+    const crmKey = @json((string) config('services.crm_key'));
+
     const form = document.getElementById('inquiry-form');
     const submit = document.getElementById('submit');
     const result = document.getElementById('result');
@@ -159,13 +165,55 @@
         result.hidden = true;
     }
 
+    const terminalStatuses = new Set(['succeeded', 'failed']);
+
+    // POST /inquiry/triage hands the run to the Redis queue and answers 202, so
+    // the classification only exists once the worker has finished it. Poll the
+    // run until it reaches a terminal status, then render the result envelope.
+    async function pollForResult(inquiryId) {
+        for (let attempt = 0; attempt < 300; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+
+            const response = await fetch(`/inquiry/${inquiryId}`, {
+                headers: { 'X-CRM-Key': crmKey, 'Accept': 'application/json' },
+            });
+
+            if (!response.ok) {
+                throw new Error('Lost track of the run.');
+            }
+
+            const data = await response.json();
+
+            if (!terminalStatuses.has(data.status)) {
+                continue;
+            }
+
+            if (data.status === 'failed') {
+                throw new Error(data.error ?? 'The run failed.');
+            }
+
+            if (!data.result) {
+                throw new Error('The run finished without a result.');
+            }
+
+            return data.result;
+        }
+
+        throw new Error('The run is still going. Check back in a moment.');
+    }
+
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         submit.disabled = true;
+
         try {
             const response = await fetch('/inquiry/triage', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CRM-Key': crmKey,
+                },
                 body: JSON.stringify({
                     first_name: document.getElementById('first-name').value.trim(),
                     last_name: document.getElementById('last-name').value.trim(),
@@ -184,9 +232,9 @@
                 return;
             }
 
-            show(data);
-        } catch {
-            showError('Could not reach the service. Please try again shortly.');
+            show(await pollForResult(data.inquiry_id));
+        } catch (error) {
+            showError(error.message || 'Could not reach the service. Please try again shortly.');
         } finally {
             submit.disabled = false;
         }

@@ -3,7 +3,6 @@
 use App\Http\Controllers\AdminClassificationResultsController;
 use App\Http\Controllers\AdminFactorSettingsController;
 use App\Http\Controllers\AdminIndustrySectorsController;
-use App\Http\Controllers\CrmInquiryController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\InquiryController;
 use App\Http\Middleware\VerifyUpstreamToken;
@@ -26,16 +25,16 @@ Route::get('/health', HealthController::class)->name('health');
 
 Route::get('/', [InquiryController::class, 'show'])->name('inquiry.test-console');
 Route::get('/inquiry', [InquiryController::class, 'show']);
-Route::post('/inquiry/triage', [InquiryController::class, 'triage'])
-    ->middleware(['run.begin', 'web.research', 'scope.gate'])
-    ->name('inquiry.triage');
 
-// CRM ingest surface (feature 013): share-key authenticated + Redis-backed
-// per-key throttle. Enqueued runs progress via the inquiry-worker queue rep.
-Route::middleware(['crm.key', 'throttle:crm'])->group(function () {
-    Route::post('/inquiry/enqueue', [CrmInquiryController::class, 'enqueue'])
-        ->name('inquiry.enqueue');
-    Route::get('/inquiry/{id}', [CrmInquiryController::class, 'poll'])
+// The single inquiry surface: POST /inquiry/triage authenticates with the
+// shared X-CRM-Key, opens a run row and hands it to the Redis queue
+// (202 + inquiry_id); GET /inquiry/{id} returns the finished result. Both used
+// to be duplicated behind a separate CRM ingest controller — one route pair,
+// one controller, no throttle.
+Route::middleware('crm.key')->group(function () {
+    Route::post('/inquiry/triage', [InquiryController::class, 'triage'])
+        ->name('inquiry.triage');
+    Route::get('/inquiry/{id}', [InquiryController::class, 'poll'])
         ->whereNumber('id')
         ->name('inquiry.poll');
 });

@@ -9,6 +9,7 @@ use App\Services\NotifyClientGrowthDirector;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Tests\Feature\Support\SpyNotifyClientGrowthDirector;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -276,7 +277,7 @@ class IndustrySectorFactorTest extends TestCase
     public function test_unparseable_sector_list_notifies_and_throws(): void
     {
         $spy = $this->bindNotifySpy();
-        Stubs::fakeSectorClassification([new \stdClass()]);
+        Stubs::fakeSectorClassification([new \stdClass]);
 
         try {
             $this->makeFactor()->score(self::INQUIRY, $this->context());
@@ -289,49 +290,10 @@ class IndustrySectorFactorTest extends TestCase
     }
 
     // =========================================================================
-    // US2 — triage run records the drop and stays 200
+    // US2 — triage run records the drop
     // =========================================================================
-
-    public function test_triage_run_with_drop_stays_200_and_records_the_drop(): void
-    {
-        $spy = $this->bindNotifySpy();
-
-        Stubs::fakeLoginOk();
-        Stubs::fakeRagQuery([Stubs::ragResult()]);
-        Stubs::fakeSectorClassification([], ['Media & Entertainment'], 'No plausible catalog sector.');
-
-        $response = $this->postJson('/inquiry/triage', [
-            'message' => 'We are building a retail payments platform for online stores.',
-            'first_name' => 'Jane',
-            'last_name' => 'Doe',
-            'email' => 'jane@example.com',
-        ]);
-
-        $response->assertOk()
-            ->assertJsonPath('classification', 'disqualify')
-            ->assertJsonMissingPath('factor_scores.industry_sector');
-
-        $drop = collect($response->json('dropped_factors'))
-            ->firstWhere('name', 'industry_sector');
-        $this->assertNotNull($drop, 'industry_sector should appear in dropped_factors.');
-        $this->assertNotEmpty($drop['reason']);
-
-        $this->assertCount(1, $spy->calls);
-        $this->assertSame('classification failed (no sector in catalog plausible)', $spy->calls[0]['reason']);
-    }
-}
-
-/**
- * Records notify() invocations so tests can assert the review-decision payload
- * (US2) without a real alert channel (ASS-06).
- */
-class SpyNotifyClientGrowthDirector extends NotifyClientGrowthDirector
-{
-    /** @var array<int, array{reason: string, context: array<string, mixed>}> */
-    public array $calls = [];
-
-    public function notify(string $reason, array $context): void
-    {
-        $this->calls[] = ['reason' => $reason, 'context' => $context];
-    }
+    //
+    // The end-to-end shape (a dropped factor still completes the run `succeeded`
+    // and records the drop) is covered in ProcessTriageJobTest now that the
+    // pipeline is driven by the Redis worker instead of the HTTP request.
 }

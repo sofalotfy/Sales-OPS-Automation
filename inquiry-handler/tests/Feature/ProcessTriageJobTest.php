@@ -6,8 +6,12 @@ use App\Enums\InquiryRunStatus;
 use App\Jobs\ProcessTriageJob;
 use App\Models\ClassificationResult;
 use App\ScopeGate\ScopeCheckService;
+use App\Scoring\CompanySizeFactor;
+use App\Scoring\FactorRegistry;
+use App\Scoring\IndustrySectorFactor;
 use App\Scoring\ScoringEngine;
 use App\Services\InquiryRunService;
+use App\Services\NotifyClientGrowthDirector;
 use App\Triage\SystemPrompt;
 use App\WebResearch\ResearchAgent;
 use App\WebResearch\ResearchOutcome;
@@ -19,6 +23,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Tests\Feature\Support\PinsCompanySizeCatalog;
+use Tests\Feature\Support\SpyNotifyClientGrowthDirector;
 use Tests\Feature\Support\UpstreamStubs as Stubs;
 use Tests\TestCase;
 
@@ -32,8 +37,9 @@ use Tests\TestCase;
  *    completes it `succeeded`;
  *  - a research decline and a scope decline each complete the run `succeeded`
  *    with a disqualify envelope + refusal, never running later stages;
- *  - a terminal row is never re-run (US4); and
- *  - a failure on its last attempt marks the run `failed` (US5).
+ *  - a terminal row is never re-run (US4);
+ *  - a failure on its last attempt marks the run `failed` (US5); and
+ *  - every stage that cannot produce a verdict fails open to the next one.
  */
 class ProcessTriageJobTest extends TestCase
 {
@@ -227,6 +233,31 @@ class ProcessTriageJobTest extends TestCase
         $this->assertSame('The inquiry is outside the served scope.', $envelope['reply']);
     }
 
+    public function test_declined_inquiry_is_reviewable_via_the_admin_api(): void
+    {
+        config(['scope_gate.enabled' => true]);
+
+        Stubs::fakeLoginOk();
+        Stubs::fakeRagQuery([Stubs::ragResult()]);
+        Stubs::fakeScopeDecline('We do not offer this service.');
+
+        $id = $this->enqueue();
+        ProcessTriageJob::dispatchSync($id);
+
+        $this->assertSame('disqualify', ClassificationResult::findOrFail($id)->classification->value);
+
+        Stubs::authVerifyOk();
+
+        $this->getJson('/admin/classification-results', [
+            'Authorization' => 'Bearer '.Stubs::token(),
+            'Accept' => 'application/json',
+        ])->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.inquiry_message', 'Do you build enterprise web applications?')
+            ->assertJsonPath('items.0.classification', 'disqualify')
+            ->assertJsonPath('items.0.scope_check_outcome', 'decline');
+    }
+
     public function test_terminal_run_is_never_rerun(): void
     {
         // Enqueue, then complete the run as a research decline before the job
@@ -311,5 +342,187 @@ class ProcessTriageJobTest extends TestCase
         $row = ClassificationResult::findOrFail($id);
         $this->assertSame('failed', $row->status->value);
         $this->assertSame('boom', $row->error);
+    }
+
+    // =========================================================================
+    // Degradation contracts
+    //
+    // Every stage that cannot produce a verdict must fail open to the next one
+    // rather than taking the run down: a research or scope failure leaves the
+    // stage `indeterminate`, and an unusable context or provider leaves the
+    // run `disqualify` with a zero score instead of a 500. These used to be
+    // asserted through the synchronous HTTP response; they are asserted on the
+    // run row + poll envelope now that the worker owns the pipeline.
+    // =========================================================================
+
+    public function test_research_not_found_is_an_accept_with_an_explicit_statement(): void
+    {
+        config(['web_research.enabled' => true]);
+
+        $this->bindProvider(fn (array $criteria) => ['company' => ['results' => []], 'person' => ['results' => []]]);
+        $this->bindAgent(ResearchResult::notFound('No public information about Example Corp / Jane Doe could be found to establish a profile.'));
+        Stubs::fakeAiFactorScore(0);
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('accept', $row->web_research_outcome);
+
+        $envelope = $this->app->make(InquiryRunService::class)->pollPayload($row)['result'];
+        $this->assertSame('accept', $envelope['context']['web_research']['outcome']);
+        $this->assertSame('not_found', $envelope['context']['web_research']['findings']['outcome']);
+        $this->assertSame(
+            'No public information about Example Corp / Jane Doe could be found to establish a profile.',
+            $envelope['context']['web_research']['findings']['summary'],
+        );
+        $this->assertEquals(0, $envelope['factor_scores']['company_size']['score']);
+        $this->assertSame(
+            'Company size could not be estimated: no public information about the company was found.',
+            $envelope['factor_scores']['company_size']['reasoning'],
+        );
+    }
+
+    public function test_research_provider_failure_fails_open_to_classification(): void
+    {
+        config(['web_research.enabled' => true]);
+
+        $this->bindProvider(fn (array $criteria) => throw new RuntimeException('search provider down'));
+        $this->bindAgent(ResearchResult::notFound('not reached'));
+        Stubs::fakeAiFactorScore(0);
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('indeterminate', $row->web_research_outcome);
+        $this->assertSame('disqualify', $row->classification->value);
+
+        $envelope = $this->app->make(InquiryRunService::class)->pollPayload($row)['result'];
+        $this->assertSame('indeterminate', $envelope['context']['web_research']['outcome']);
+        $this->assertSame([], $envelope['context']['web_research']['findings']);
+    }
+
+    public function test_research_agent_failure_fails_open_to_classification(): void
+    {
+        config(['web_research.enabled' => true]);
+
+        $this->bindProvider(fn (array $criteria) => [
+            'company' => ['results' => [['title' => 'Example Corp', 'url' => 'https://example.com', 'snippet' => '']]],
+            'person' => ['results' => []],
+        ]);
+        $this->bindAgent(ResearchResult::indeterminate('The research filter was unavailable.'));
+        Stubs::fakeAiFactorScore(0);
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('indeterminate', $row->web_research_outcome);
+        $this->assertSame([], $row->web_research['findings']);
+        $this->assertSame('disqualify', $row->classification->value);
+    }
+
+    public function test_scope_gate_ai_failure_fails_open_to_classification(): void
+    {
+        config(['scope_gate.enabled' => true]);
+
+        Stubs::fakeLoginOk();
+        Stubs::fakeRagQuery([Stubs::ragResult()]);
+        Stubs::fakeAiFailure(500);
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('indeterminate', $row->scope_check_outcome);
+        $this->assertSame('disqualify', $row->classification->value);
+
+        $envelope = $this->app->make(InquiryRunService::class)->pollPayload($row)['result'];
+        $this->assertSame('indeterminate', $envelope['context']['scope_check']['outcome']);
+        $this->assertEquals(0, $envelope['factor_scores']['company_size']['score']);
+    }
+
+    public function test_ai_http_error_degrades_to_disqualify_with_empty_factors(): void
+    {
+        Stubs::fakeLoginOk();
+        Stubs::fakeRagQuery([Stubs::ragResult()]);
+        Stubs::fakeAiFailure(500);
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('disqualify', $row->classification->value);
+        $this->assertEquals(0.0, $row->final_score);
+
+        $envelope = $this->app->make(InquiryRunService::class)->pollPayload($row)['result'];
+        $this->assertSame('disqualify', $envelope['classification']);
+        $this->assertEquals(0, $envelope['factor_scores']['company_size']['score']);
+        $this->assertSame('Do you build enterprise web applications?', $envelope['context']['inquiry']['message']);
+    }
+
+    public function test_rag_unavailable_degrades_with_context_preserved(): void
+    {
+        Stubs::fakeLoginOk();
+        Stubs::fakeRagFailure(503);
+        Stubs::fakeAi('booking');
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('disqualify', $row->classification->value);
+
+        $envelope = $this->app->make(InquiryRunService::class)->pollPayload($row)['result'];
+        $this->assertSame(0, $envelope['context']['retrieved_context']['result_count']);
+        $this->assertSame([], $envelope['context']['retrieved_context']['results']);
+    }
+
+    public function test_dropped_sector_factor_is_recorded_and_the_run_still_succeeds(): void
+    {
+        // The real catalog (company_size + industry_sector), not the pinned one:
+        // this is the shape where a factor cannot classify and drops out.
+        $spy = new SpyNotifyClientGrowthDirector;
+        $this->app->instance(NotifyClientGrowthDirector::class, $spy);
+
+        $registry = new FactorRegistry;
+        $registry->add($this->app->make(CompanySizeFactor::class));
+        $registry->add($this->app->make(IndustrySectorFactor::class));
+        $this->app->instance(FactorRegistry::class, $registry);
+
+        Stubs::fakeLoginOk();
+        Stubs::fakeRagQuery([Stubs::ragResult()]);
+        Stubs::fakeSectorClassification([], ['Media & Entertainment'], 'No plausible catalog sector.');
+
+        $id = $this->enqueue();
+
+        ProcessTriageJob::dispatchSync($id);
+
+        $row = ClassificationResult::findOrFail($id);
+        $this->assertSame('succeeded', $row->status->value);
+        $this->assertSame('disqualify', $row->classification->value);
+
+        $envelope = $this->app->make(InquiryRunService::class)->pollPayload($row)['result'];
+        $this->assertArrayNotHasKey('industry_sector', $envelope['factor_scores']);
+
+        $drop = collect($envelope['dropped_factors'])->firstWhere('name', 'industry_sector');
+        $this->assertNotNull($drop, 'industry_sector should appear in dropped_factors.');
+        $this->assertNotEmpty($drop['reason']);
+
+        $this->assertCount(1, $spy->calls);
+        $this->assertSame('classification failed (no sector in catalog plausible)', $spy->calls[0]['reason']);
     }
 }

@@ -25,7 +25,6 @@ class CrmPollApiTest extends TestCase
     {
         parent::setUp();
         config(['services.crm_key' => 'crm-secret']);
-        config(['services.crm_rate_limit' => 120]);
         config(['services.booking_url' => null]);
     }
 

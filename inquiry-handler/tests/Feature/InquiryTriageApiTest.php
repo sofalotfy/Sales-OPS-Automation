@@ -5,20 +5,18 @@ namespace Tests\Feature;
 use App\Jobs\ProcessTriageJob;
 use App\Models\ClassificationResult;
 use App\Services\InquiryRunService;
-use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
-use Illuminate\Support\Facades\RateLimiter;
 use RuntimeException;
 use Tests\TestCase;
 
 /**
  * CRM enqueue surface (feature 013, US1; contracts/crm-ingest-web.md):
- * POST /inquiry/enqueue acknowledges one campaign lead with a run id and
+ * POST /inquiry/triage acknowledges one campaign lead with a run id and
  * dispatches the background pipeline. Idempotent on (campaign_id, lead_id) —
  * a re-submission is ack'd 409 and never re-runs (no double spend).
  */
-class CrmEnqueueApiTest extends TestCase
+class InquiryTriageApiTest extends TestCase
 {
     use RefreshDatabase;
 
@@ -26,7 +24,6 @@ class CrmEnqueueApiTest extends TestCase
     {
         parent::setUp();
         config(['services.crm_key' => 'crm-secret']);
-        config(['services.crm_rate_limit' => 120]);
         Queue::fake();
     }
 
@@ -52,7 +49,7 @@ class CrmEnqueueApiTest extends TestCase
 
     public function test_enqueue_accepts_and_dispatches(): void
     {
-        $response = $this->postJson('/inquiry/enqueue', $this->payload(), $this->keyHeaders());
+        $response = $this->postJson('/inquiry/triage', $this->payload(), $this->keyHeaders());
 
         $response->assertStatus(202)
             ->assertJsonPath('status', 'queued')
@@ -77,11 +74,11 @@ class CrmEnqueueApiTest extends TestCase
 
     public function test_resubmission_is_idempotent_and_never_reruns(): void
     {
-        $first = $this->postJson('/inquiry/enqueue', $this->payload(), $this->keyHeaders());
+        $first = $this->postJson('/inquiry/triage', $this->payload(), $this->keyHeaders());
         $first->assertStatus(202);
         $inquiryId = $first->json('inquiry_id');
 
-        $this->postJson('/inquiry/enqueue', $this->payload(), $this->keyHeaders())
+        $this->postJson('/inquiry/triage', $this->payload(), $this->keyHeaders())
             ->assertStatus(409)
             ->assertJsonPath('inquiry_id', $inquiryId)
             ->assertJsonPath('status', 'existing')
@@ -95,15 +92,12 @@ class CrmEnqueueApiTest extends TestCase
     public function test_validation_errors_are_422_and_nothing_is_enqueued(): void
     {
         $cases = [
-            'missing campaign_id' => $this->payload(['campaign_id' => null]),
-            'missing lead_id' => $this->payload(['lead_id' => null]),
             'missing message' => $this->payload(['message' => null]),
             'bad email' => $this->payload(['email' => 'not-an-email']),
-            'lead_id too long' => $this->payload(['lead_id' => str_repeat('x', 256)]),
         ];
 
         foreach ($cases as $name => $body) {
-            $this->postJson('/inquiry/enqueue', $body, $this->keyHeaders())
+            $this->postJson('/inquiry/triage', $body, $this->keyHeaders())
                 ->assertStatus(422)
                 ->assertJsonStructure(['detail']);
         }
@@ -112,9 +106,31 @@ class CrmEnqueueApiTest extends TestCase
         Queue::assertNothingPushed();
     }
 
+    public function test_crm_identifiers_are_optional_and_synthesised_per_submission(): void
+    {
+        // The console (and any caller that is not a CRM) sends no
+        // campaign_id/lead_id: the route still acknowledges, and each submission
+        // gets its own lead id so the (campaign_id, lead_id) idempotency pair
+        // never collapses two different inquiries into one row.
+        $first = $this->postJson('/inquiry/triage', $this->payload([
+            'campaign_id' => null,
+            'lead_id' => null,
+        ]), $this->keyHeaders())->assertStatus(202);
+
+        $second = $this->postJson('/inquiry/triage', $this->payload([
+            'campaign_id' => null,
+            'lead_id' => null,
+        ]), $this->keyHeaders())->assertStatus(202);
+
+        $this->assertSame('test-console', $first->json('campaign_id'));
+        $this->assertNotSame($first->json('lead_id'), $second->json('lead_id'));
+        $this->assertSame(2, ClassificationResult::query()->count());
+        Queue::assertPushed(ProcessTriageJob::class, 2);
+    }
+
     public function test_blank_message_is_422(): void
     {
-        $this->postJson('/inquiry/enqueue', $this->payload(['message' => '   ']), $this->keyHeaders())
+        $this->postJson('/inquiry/triage', $this->payload(['message' => '   ']), $this->keyHeaders())
             ->assertStatus(422)
             ->assertJsonPath('detail', 'The message must not be blank.');
 
@@ -123,7 +139,7 @@ class CrmEnqueueApiTest extends TestCase
 
     public function test_non_object_body_returns_400(): void
     {
-        $this->call('POST', '/inquiry/enqueue', [], [], [], [
+        $this->call('POST', '/inquiry/triage', [], [], [], [
             'HTTP_CONTENT_TYPE' => 'application/json',
             'HTTP_ACCEPT' => 'application/json',
             'HTTP_X-CRM-Key' => 'crm-secret',
@@ -136,7 +152,7 @@ class CrmEnqueueApiTest extends TestCase
 
     public function test_missing_key_is_rejected(): void
     {
-        $this->postJson('/inquiry/enqueue', $this->payload())
+        $this->postJson('/inquiry/triage', $this->payload())
             ->assertStatus(401)
             ->assertJsonPath('detail', 'Invalid or missing CRM API key.');
 
@@ -145,23 +161,9 @@ class CrmEnqueueApiTest extends TestCase
 
     public function test_wrong_key_is_rejected(): void
     {
-        $this->postJson('/inquiry/enqueue', $this->payload(), ['X-CRM-Key' => 'wrong'])
+        $this->postJson('/inquiry/triage', $this->payload(), ['X-CRM-Key' => 'wrong'])
             ->assertStatus(401)
             ->assertJsonPath('detail', 'Invalid or missing CRM API key.');
-    }
-
-    public function test_exceeding_the_crm_limit_returns_the_contracted_429_body(): void
-    {
-        // Contracted envelope for the per-key limiter (contracts/crm-ingest-web.md):
-        // a plain {"detail": "Too Many Requests"} — NOT Laravel's default debug
-        // payload. The render callback (bootstrap/app.php) targets the exact
-        // ThrottleRequestsException class the throttle middleware throws.
-        RateLimiter::for('crm', fn () => Limit::perMinute(1)->by('crm-limit-test'));
-
-        $this->postJson('/inquiry/enqueue', $this->payload(), $this->keyHeaders())->assertStatus(202);
-        $this->postJson('/inquiry/enqueue', $this->payload(), $this->keyHeaders())
-            ->assertStatus(429)
-            ->assertExactJson(['detail' => 'Too Many Requests']);
     }
 
     public function test_unreachable_store_is_a_503_and_nothing_is_dropped_silently(): void
@@ -173,7 +175,7 @@ class CrmEnqueueApiTest extends TestCase
             ->getMock();
         $this->app->instance(InquiryRunService::class, $service);
 
-        $this->postJson('/inquiry/enqueue', $this->payload(), $this->keyHeaders())
+        $this->postJson('/inquiry/triage', $this->payload(), $this->keyHeaders())
             ->assertStatus(503)
             ->assertJsonPath('detail', 'Queue unavailable. Please retry in a moment.');
 

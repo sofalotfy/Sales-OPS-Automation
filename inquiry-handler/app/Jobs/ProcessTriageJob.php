@@ -19,7 +19,7 @@ use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * The Redis-backed worker payload for POST /inquiry/enqueue (feature 013,
+ * The Redis-backed worker payload for POST /inquiry/triage (feature 013,
  * US1): replays the synchronous triage chain — web research → scope gate →
  * weighted multi-factor scoring — against one run row, advancing its status
  * per stage and writing each stage's columns as it completes.
