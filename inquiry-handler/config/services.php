@@ -46,23 +46,36 @@ return [
         'key' => env('AI_API_KEY'),
         // Default (lighter, fast) model for scope checks and any non-research
         // AI call. Kept separate from the research agent's models so stronger
-        // ones are only spent where they earn their keep.
-        'model' => env('AI_MODEL', 'openai/gpt-oss-20b'),
+        // ones are only spent where they earn their keep. Note: on Groq the
+        // free tier rejects response_format=json_object for gpt-oss-20b (400
+        // json_validate_failed), and the caller only falls back to plain mode
+        // on 422 — so the default/filter roles stay on gpt-oss-120b, which
+        // serves JSON mode reliably.
+        'model' => env('AI_MODEL', 'openai/gpt-oss-120b'),
         // Strongest model for the AI research agent's notes + summarize steps.
         'research_model' => env('AI_RESEARCH_MODEL', 'openai/gpt-oss-120b'),
         // Research candidate filter model: cheap/fast, it only keeps/rejects
         // candidate URLs so it does not need the strongest weights.
-        'filter_model' => env('AI_FILTER_MODEL', 'openai/gpt-oss-20b'),
+        'filter_model' => env('AI_FILTER_MODEL', 'openai/gpt-oss-120b'),
         // Max concurrent in-flight AI requests when a step fans out (layer-1
         // notes batches). Bounded by Groq free-tier limits (30 RPM, 8K TPM);
         // bursts above the token ceiling self-throttle via 429 + retry-after.
         'concurrency' => max(1, (int) env('AI_CONCURRENCY', 4)),
         // Cap on generated tokens per call. gpt-oss defaults to 65K output,
-        // which would burn a free tier's daily budget on one summary.
-        'max_output_tokens' => max(1, (int) env('AI_MAX_OUTPUT_TOKENS', 4096)),
+        // which would burn a free tier's daily budget on one summary. Kept
+        // well under the 8K-tokens-per-minute Groq window so a single
+        // completion cannot starve the rest of a batch.
+        'max_output_tokens' => max(1, (int) env('AI_MAX_OUTPUT_TOKENS', 2048)),
         // Per-request HTTP timeout (seconds).
         'timeout' => (int) env('AI_TIMEOUT', 90),
         'url' => env('AI_API_URL', 'https://api.groq.com/openai/v1/chat/completions'),
+        // Throughput guard (feature 013 US2/US3): an optional fixed-window
+        // requests-per-minute ceiling plus an in-flight cap protecting the
+        // provider's free-tier limits. Stats and gates live in Redis so every
+        // inquiry-worker shares one budget. Off when AI_GUARD_ENABLED=false.
+        'guard_enabled' => (bool) env('AI_GUARD_ENABLED', true),
+        'guard_max_per_min' => max(1, (int) env('AI_MAX_PER_MIN', 30)),
+        'guard_max_inflight' => max(1, (int) env('AI_MAX_INFLIGHT', 4)),
     ],
 
     'service_account' => [
@@ -80,5 +93,12 @@ return [
     ],
 
     'booking_url' => env('BOOKING_URL'),
+
+    // Shared credential the CRM presents as X-CRM-Key (feature 013 US1; key
+    // from env only, FR-011). Empty value tight-shuts the CRM surface.
+    'crm_key' => env('CRM_API_KEY'),
+    // Per-key rate limit (requests/minute) for the CRM ingest surface,
+    // enforced via throttle:crm → Redis (contracts/crm-ingest-web.md).
+    'crm_rate_limit' => max(1, (int) env('CRM_RATE_MAX_PER_MIN', 120)),
 
 ];

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\AiThroughputGuard;
 use App\Triage\PromptBuilder;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Pool;
@@ -23,9 +24,10 @@ class AiCallingService
     /** Bounded retries for fast transient provider failures (429/5xx). */
     private const MAX_RETRIES = 3;
 
-    public function __construct(private readonly PromptBuilder $promptBuilder)
-    {
-    }
+    public function __construct(
+        private readonly PromptBuilder $promptBuilder,
+        private readonly AiThroughputGuard $guard,
+    ) {}
 
     /**
      * @deprecated Superseded by the scoring engine (feature 006). Factor
@@ -52,7 +54,7 @@ class AiCallingService
         try {
             $response = $this->call($job, $key, withJsonMode: true);
 
-            if ($response->status() === 422) {
+            if ($this->needsPlainRetry($response)) {
                 $response = $this->call($job, $key, withJsonMode: false);
             }
         } catch (ConnectionException) {
@@ -110,6 +112,27 @@ class AiCallingService
      */
     public function complete(string $system, string $user, ?string $model = null): ?array
     {
+        // Feature 013 US2: respect the shared per-minute + in-flight budgets
+        // before spending a call. Over budget (null) → fail this call open,
+        // exactly as every other AI failure degrades.
+        $token = $this->guard->start();
+
+        if ($token === null) {
+            return null;
+        }
+
+        try {
+            return $this->completeGuarded($system, $user, $model);
+        } finally {
+            $this->guard->finish($token);
+        }
+    }
+
+    /**
+     * @return array<mixed>|null
+     */
+    private function completeGuarded(string $system, string $user, ?string $model = null): ?array
+    {
         $key = (string) config('services.ai.key');
 
         if ($key === '') {
@@ -123,7 +146,7 @@ class AiCallingService
             try {
                 $response = $this->call($job, $key, withJsonMode: true);
 
-                if ($response->status() === 422) {
+                if ($this->needsPlainRetry($response)) {
                     $response = $this->call($job, $key, withJsonMode: false);
                 }
             } catch (ConnectionException) {
@@ -142,6 +165,7 @@ class AiCallingService
             // transient 413 (token-per-minute) and 429 bursts.
             if (in_array($response->status(), [413, 429, 500, 502, 503, 504], true) && $attempt < self::MAX_RETRIES) {
                 usleep(min(30, $this->retryAfterSeconds($response) ?: $attempt * 2) * 1_000_000);
+
                 continue;
             }
 
@@ -193,6 +217,30 @@ class AiCallingService
         }
 
         if ($key === '' || $pending === []) {
+            return $results;
+        }
+
+        // Feature 013 US2: reserve a shared (RPM + in-flight) slot per job
+        // BEFORE the round fires, so an over-budget job fails open here
+        // instead of spending a burst the provider would reject. Uncounted
+        // calls (guard off/unavailable) still send without a token.
+        $reservedTokens = [];
+
+        foreach ($pending as $jobKey => $job) {
+            $token = $this->guard->start();
+
+            if ($token === null) {
+                unset($pending[$jobKey]);
+
+                continue;
+            }
+
+            if ($token !== '') {
+                $reservedTokens[$jobKey] = $token;
+            }
+        }
+
+        if ($pending === []) {
             return $results;
         }
 
@@ -248,6 +296,7 @@ class AiCallingService
 
                 $resolved = $this->resolveResponse($job, $response);
                 $results[$jobKey] = $resolved;
+                $this->releaseReservation($reservedTokens, $jobKey);
             }
 
             if ($retry === []) {
@@ -260,7 +309,29 @@ class AiCallingService
             $pending = $retry;
         }
 
+        // Jobs still holding reservations when the rounds end (e.g. the pool
+        // broke on a transport failure) must still release their slot.
+        foreach ($reservedTokens as $token) {
+            $this->guard->finish($token);
+        }
+
         return $results;
+    }
+
+    /**
+     * Release one job's reservation once it is resolved (no-op for tokens that
+     * were never granted).
+     *
+     * @param  array<string, string>  $reservedTokens
+     */
+    private function releaseReservation(array &$reservedTokens, string $jobKey): void
+    {
+        if (! isset($reservedTokens[$jobKey])) {
+            return;
+        }
+
+        $this->guard->finish($reservedTokens[$jobKey]);
+        unset($reservedTokens[$jobKey]);
     }
 
     /**
@@ -277,7 +348,7 @@ class AiCallingService
             return null;
         }
 
-        if ($response->status() === 422) {
+        if ($this->needsPlainRetry($response)) {
             try {
                 $response = $this->call($job, (string) config('services.ai.key'), withJsonMode: false);
             } catch (ConnectionException) {
@@ -294,6 +365,26 @@ class AiCallingService
         }
 
         return null;
+    }
+
+    /**
+     * Whether a JSON-mode response needs retrying once in plain mode.
+     *
+     * Some provider/model pairs refuse `response_format=json_object` as a
+     * validation-level error: Z.AI answered with 422 (the original signal this
+     * fallback was written for), while Groq answers 400 with a body containing
+     * `json_validate_failed` for gpt-oss-20b on accounts where JSON mode is
+     * unsupported/unavailable. Plain mode still returns parseable JSON, so a
+     * single retry recovers the call instead of failing the stage open.
+     */
+    private function needsPlainRetry(Response $response): bool
+    {
+        if ($response->status() === 422) {
+            return true;
+        }
+
+        return $response->status() === 400
+            && str_contains($response->body(), 'json_validate_failed');
     }
 
     /**

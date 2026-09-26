@@ -3,7 +3,9 @@
 namespace App\Http\Middleware;
 
 use App\Enums\Classification;
+use App\Enums\InquiryRunStatus;
 use App\Models\ClassificationResult;
+use App\Services\InquiryRunService;
 use App\Triage\Exceptions\MessageValidationException;
 use App\Triage\MessageExtractor;
 use App\Triage\SystemPrompt;
@@ -33,6 +35,13 @@ use Throwable;
  * extraction/validation failure falls through so the controller emits the
  * existing 400/422 unchanged. When web_research.enabled is false the step is
  * fully bypassed and no web_research marker is produced.
+ *
+ * Since feature 013 the run row is opened earlier (BeginInquiryRun) and this
+ * step PROGRESSIVELY writes to it: `researching` is set before research runs,
+ * the research columns land on completion, and a decline completes the same
+ * row `succeeded` with a disqualify envelope + refusal. Without a staged row
+ * (`inquiry_run_id` absent) the step keeps its pre-feature create-on-decline
+ * behavior.
  */
 class WebResearchMiddleware
 {
@@ -40,6 +49,7 @@ class WebResearchMiddleware
         private readonly MessageExtractor $extractor,
         private readonly WebResearchService $researchService,
         private readonly SystemPrompt $systemPrompt,
+        private readonly InquiryRunService $runs,
     ) {}
 
     public function handle(Request $request, Closure $next): Response
@@ -60,6 +70,11 @@ class WebResearchMiddleware
             return $next($request);
         }
 
+        $runId = $this->runId($request);
+        if ($runId !== null) {
+            $this->runs->markStatus($runId, InquiryRunStatus::Researching);
+        }
+
         $result = $this->researchService->run($inquiry);
         $verdict = $result['verdict'];
 
@@ -69,6 +84,10 @@ class WebResearchMiddleware
 
         if ($verdict->isDecline()) {
             return $this->declined($request, $inquiry, $result);
+        }
+
+        if ($runId !== null) {
+            $this->persistProgress($runId, $verdict, $result);
         }
 
         return $next($request);
@@ -85,37 +104,32 @@ class WebResearchMiddleware
         $refusal = $verdict->refusal ?? $reason;
         $criteria = $result['criteria'];
 
-        try {
-            ClassificationResult::create([
-                'inquiry_message' => $inquiry['message'],
-                'first_name' => $inquiry['first_name'],
-                'last_name' => $inquiry['last_name'],
-                'email' => $inquiry['email'],
-                'phone_number' => $inquiry['phone_number'] ?? null,
-                'company_name' => $inquiry['company_name'] ?? null,
-                'country_region' => $inquiry['country_region'] ?? null,
-                'retrieved_context' => ['result_count' => 0, 'results' => []],
-                'factor_scores' => [],
-                'dropped_factors' => [],
-                'final_score' => 0.0,
-                'classification' => Classification::Disqualify,
-                'reasoning' => $reason,
-                'web_research_outcome' => WebResearchVerdict::DECLINE,
-                'web_research_reason' => $reason,
-                'web_research' => [
-                    'criteria' => $criteria,
-                    'findings' => $verdict->research,
-                    'audit' => null,
-                ],
-                'system_prompt' => $this->systemPrompt->content(),
-                'refusal' => $refusal,
-            ]);
-        } catch (Throwable $e) {
-            Log::error('Failed to persist declined web-research record.', [
-                'message' => $inquiry['message'],
-                'error' => $e->getMessage(),
-            ]);
-        }
+        $fields = [
+            'inquiry_message' => $inquiry['message'],
+            'first_name' => $inquiry['first_name'],
+            'last_name' => $inquiry['last_name'],
+            'email' => $inquiry['email'],
+            'phone_number' => $inquiry['phone_number'] ?? null,
+            'company_name' => $inquiry['company_name'] ?? null,
+            'country_region' => $inquiry['country_region'] ?? null,
+            'retrieved_context' => ['result_count' => 0, 'results' => []],
+            'factor_scores' => [],
+            'dropped_factors' => [],
+            'final_score' => 0.0,
+            'classification' => Classification::Disqualify,
+            'reasoning' => $reason,
+            'web_research_outcome' => WebResearchVerdict::DECLINE,
+            'web_research_reason' => $reason,
+            'web_research' => [
+                'criteria' => $criteria,
+                'findings' => $verdict->research,
+                'audit' => null,
+            ],
+            'system_prompt' => $this->systemPrompt->content(),
+            'refusal' => $refusal,
+        ];
+
+        $this->persist($request, $fields);
 
         return response()->json([
             'classification' => Classification::Disqualify->value,
@@ -144,5 +158,57 @@ class WebResearchMiddleware
                 ],
             ],
         ]);
+    }
+
+    /**
+     * Land the research columns on the staged run after an accept /
+     * indeterminate pass-through.
+     *
+     * @param  array{verdict: WebResearchVerdict, criteria: array<string, mixed>}  $result
+     */
+    private function persistProgress(int $runId, WebResearchVerdict $verdict, array $result): void
+    {
+        $this->runs->update($runId, [
+            'web_research_outcome' => $verdict->outcome,
+            'web_research_reason' => $verdict->reason,
+            'web_research' => [
+                'criteria' => $result['criteria'],
+                'findings' => $verdict->research,
+                'audit' => $result['audit'] ?? [],
+            ],
+        ]);
+    }
+
+    /**
+     * Complete the staged run (or, when none was staged, create the declined
+     * row) so a decline is never lost even when BeginInquiryRun failed.
+     *
+     * @param  array<string, mixed>  $fields
+     */
+    private function persist(Request $request, array $fields): void
+    {
+        $runId = $this->runId($request);
+
+        if ($runId !== null) {
+            $this->runs->markSucceeded($runId, $fields);
+
+            return;
+        }
+
+        try {
+            ClassificationResult::create($fields + ['status' => InquiryRunStatus::Succeeded]);
+        } catch (Throwable $e) {
+            Log::error('Failed to persist declined web-research record.', [
+                'message' => $fields['inquiry_message'],
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function runId(Request $request): ?int
+    {
+        $runId = $request->attributes->get('inquiry_run_id');
+
+        return is_int($runId) || ctype_digit((string) $runId) ? (int) $runId : null;
     }
 }

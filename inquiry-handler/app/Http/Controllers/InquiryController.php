@@ -44,10 +44,12 @@ class InquiryController extends Controller
             return response()->json(['detail' => 'A JSON object is required.'], 400);
         }
 
-        $payload = $decoded;
-
+        // BeginInquiryRun (feature 013) already extracted + validated the body
+        // and staged its row; reuse that result so we never re-extract or
+        // diverge. When the middleware fell through (invalid payload) the
+        // extractor below reproduces the same 400/422 decision.
         try {
-            $inquiry = $this->extractor->extract($payload);
+            $inquiry = $request->attributes->get('inquiry') ?? $this->extractor->extract($decoded);
         } catch (MessageValidationException $e) {
             return response()->json(['detail' => $e->getMessage()], 422);
         }
@@ -59,6 +61,7 @@ class InquiryController extends Controller
                 $request->attributes->get('web_research_verdict'),
                 $request->attributes->get('web_research_criteria', []),
                 $request->attributes->get('web_research_audit', []),
+                $request->attributes->get('inquiry_run_id'),
             );
         } catch (ConnectionException) {
             return response()->json([

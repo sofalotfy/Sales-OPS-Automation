@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\Classification;
+use App\Enums\InquiryRunStatus;
 use App\Models\ClassificationResult;
 use App\ScopeGate\ScopeVerdict;
 use App\Scoring\ClassificationOutcome;
@@ -25,12 +26,19 @@ use Throwable;
  * judged against is the fixed classification system prompt (App\Triage\SystemPrompt),
  * which is persisted verbatim (`system_prompt`) for audit. The `retrieved_context`
  * column is retained (empty) in case retrieval is re-enabled later.
+ *
+ * Since feature 013 the sync run's row is opened earlier in the chain
+ * (BeginInquiryRun) and the middlewares already landed their stage columns
+ * progressively; when a run id is provided, `triage()` marks the run `scoring`
+ * before classification and completes it `succeeded` with the result fields.
+ * Without a run id it falls back to the pre-feature single create-at-completion.
  */
 class InquiryTriageService
 {
     public function __construct(
         private readonly ScoringEngine $engine,
         private readonly SystemPrompt $systemPrompt,
+        private readonly InquiryRunService $runs,
     ) {}
 
     /**
@@ -44,6 +52,7 @@ class InquiryTriageService
         ?WebResearchVerdict $webResearchVerdict = null,
         array $webResearchCriteria = [],
         array $webResearchAudit = [],
+        ?int $runId = null,
     ): array {
         $context = $this->context($inquiry);
 
@@ -65,9 +74,13 @@ class InquiryTriageService
             ];
         }
 
+        if ($runId !== null) {
+            $this->runs->markStatus($runId, InquiryRunStatus::Scoring);
+        }
+
         $outcome = $this->engine->classify($inquiry, $context);
 
-        $this->persist($inquiry, $context['retrieved_context'], $outcome, $scopeVerdict, $webResearchVerdict, $webResearchCriteria, $webResearchAudit);
+        $this->persist($inquiry, $context['retrieved_context'], $outcome, $scopeVerdict, $webResearchVerdict, $webResearchCriteria, $webResearchAudit, $runId);
 
         return $this->respond($outcome, $context);
     }
@@ -105,8 +118,27 @@ class InquiryTriageService
         ?WebResearchVerdict $webResearchVerdict = null,
         array $webResearchCriteria = [],
         array $webResearchAudit = [],
+        ?int $runId = null,
     ): void {
         try {
+            if ($runId !== null) {
+                // The staged row already carries the payload + any research and
+                // scope columns the middlewares landed; complete it with the
+                // result fields only (written once, at completion).
+                $this->runs->markSucceeded($runId, [
+                    'retrieved_context' => $retrievedContext,
+                    'factor_scores' => $outcome->factorScoresArray(),
+                    'dropped_factors' => $outcome->droppedFactors,
+                    'final_score' => $outcome->score,
+                    'classification' => $outcome->classification,
+                    'reasoning' => $outcome->reasoning,
+                    'system_prompt' => $this->systemPrompt->content(),
+                    'refusal' => null,
+                ]);
+
+                return;
+            }
+
             ClassificationResult::create([
                 'inquiry_message' => $inquiry['message'],
                 'first_name' => $inquiry['first_name'],
@@ -132,6 +164,7 @@ class InquiryTriageService
                 ],
                 'system_prompt' => $this->systemPrompt->content(),
                 'refusal' => null,
+                'status' => InquiryRunStatus::Succeeded,
             ]);
         } catch (Throwable $e) {
             // The inbound response must still be delivered (research R3d).

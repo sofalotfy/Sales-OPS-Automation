@@ -5,10 +5,13 @@ namespace App\Providers;
 use App\Scoring\CompanySizeFactor;
 use App\Scoring\FactorRegistry;
 use App\Scoring\IndustrySectorFactor;
+use App\Triage\PromptBuilder;
 use App\WebResearch\Providers\TavilyResearchProvider;
 use App\WebResearch\WebResearchProvider;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
-use App\Triage\PromptBuilder;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -55,6 +58,13 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        // Per-key limiter for the CRM ingest surface (feature 013): keyed on
+        // the presented X-CRM-Key so every CRM consumer shares the configured
+        // per-minute budget regardless of source IP. Backed by Redis (default
+        // cache store) so the limit is global across app instances.
+        RateLimiter::for('crm', function (Request $request) {
+            return Limit::perMinute((int) config('services.crm_rate_limit', 120))
+                ->by((string) $request->header('X-CRM-Key', (string) $request->ip()));
+        });
     }
 }

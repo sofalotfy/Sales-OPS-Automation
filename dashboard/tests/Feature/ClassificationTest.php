@@ -70,6 +70,49 @@ class ClassificationTest extends TestCase
             ->assertSee('No inquiries classified yet');
     }
 
+    public function test_index_renders_in_flight_runs_with_neutral_badge_and_placeholder(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [
+                    UpstreamStubs::classificationResult(id: 3, classification: null, score: null, reasoning: null, status: 'researching'),
+                    UpstreamStubs::classificationResult(id: 1),
+                ],
+                'total' => 2,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index'))
+            ->assertOk()
+            ->assertSee('Researching')
+            ->assertSee('Pending')
+            ->assertDontSee('High priority');
+    }
+
+    public function test_index_renders_failed_runs_with_status(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [
+                    UpstreamStubs::classificationResult(id: 4, classification: null, score: null, reasoning: null, status: 'failed'),
+                ],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index'))
+            ->assertOk()
+            ->assertSee('Failed');
+    }
+
     public function test_index_surfaces_weights_failure_but_still_renders_results(): void
     {
         $this->signIn();
@@ -271,6 +314,43 @@ class ClassificationTest extends TestCase
             ->assertOk()
             ->assertSee('Best-effort research')
             ->assertSee('some details may be inaccurate or incomplete. Verify before relying');
+    }
+
+    public function test_show_renders_in_flight_run_with_pending_note(): void
+    {
+        $this->signIn();
+        $detail = UpstreamStubs::classificationDetail(id: 7, status: 'researching');
+        $detail['classification'] = null;
+        $detail['final_score'] = null;
+        $detail['reasoning'] = null;
+        $detail['factor_scores'] = [];
+        unset($detail['web_research'], $detail['web_research_outcome'], $detail['web_research_reason']);
+        UpstreamStubs::fakeClassificationResult($detail);
+
+        $this->get(route('classification.show', 7))
+            ->assertOk()
+            ->assertSee('Pending')
+            ->assertSee('Researching')
+            ->assertSee('still being processed')
+            ->assertSee('Do you offer annual maintenance contracts?')
+            ->assertDontSee('High priority');
+    }
+
+    public function test_show_renders_failed_run_with_error(): void
+    {
+        $this->signIn();
+        $detail = UpstreamStubs::classificationDetail(id: 8, status: 'failed');
+        $detail['classification'] = null;
+        $detail['final_score'] = null;
+        $detail['reasoning'] = null;
+        $detail['factor_scores'] = [];
+        $detail['error'] = 'AI provider unreachable.';
+        unset($detail['web_research'], $detail['web_research_outcome'], $detail['web_research_reason']);
+        UpstreamStubs::fakeClassificationResult($detail);
+
+        $this->get(route('classification.show', 8))
+            ->assertOk()
+            ->assertSee('This run failed. Error: AI provider unreachable.');
     }
 
     public function test_show_renders_not_found_summary_without_sources(): void

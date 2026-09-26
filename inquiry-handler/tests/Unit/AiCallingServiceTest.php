@@ -3,7 +3,9 @@
 namespace Tests\Unit;
 
 use App\Services\AiCallingService;
+use App\Support\AiThroughputGuard;
 use App\Triage\PromptBuilder;
+use GuzzleHttp\Exception\ConnectException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -27,7 +29,9 @@ class AiCallingServiceTest extends TestCase
         config(['services.ai.url' => 'https://ai.test/chat/completions']);
         config(['services.ai.model' => 'openai/gpt-oss-20b']);
         config(['services.ai.timeout' => 5]);
-        $this->service = new AiCallingService(new PromptBuilder('scope'));
+        // Guard is off under phpunit (AI_GUARD_ENABLED=false) so these tests
+        // exercise the transport, not the Redis-backed budgets.
+        $this->service = new AiCallingService(new PromptBuilder('scope'), new AiThroughputGuard);
     }
 
     public function test_transient_overload_is_retried_then_succeeds(): void
@@ -63,6 +67,27 @@ class AiCallingServiceTest extends TestCase
 
         $this->assertNull($this->service->complete('Sys', 'User'));
         Http::assertSentCount(1);
+    }
+
+    public function test_json_mode_refused_with_400_json_validate_failed_retries_in_plain_mode(): void
+    {
+        // Groq's gpt-oss-20b rejects response_format=json_object with 400
+        // json_validate_failed; plain mode still returns parseable JSON. The
+        // caller must retry that model-level refusal once like it does 422.
+        $jsonModeCalls = 0;
+        Http::fake(function (Request $request) use (&$jsonModeCalls) {
+            if (isset($request['response_format']['type']) && $request['response_format']['type'] === 'json_object') {
+                $jsonModeCalls++;
+
+                return Http::response(['error' => ['message' => 'json_validate_failed']], 400);
+            }
+
+            return Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200);
+        });
+
+        $this->assertSame(['ok' => true], $this->service->complete('Sys', 'User'));
+        $this->assertSame(1, $jsonModeCalls);
+        Http::assertSentCount(2);
     }
 
     public function test_missing_key_fails_open_without_any_request(): void
@@ -292,7 +317,7 @@ class AiCallingServiceTest extends TestCase
     {
         Http::fake(function (Request $request) {
             if ($request['messages'][1]['content'] === 'Down') {
-                throw new \GuzzleHttp\Exception\ConnectException('down', $request->toPsrRequest());
+                throw new ConnectException('down', $request->toPsrRequest());
             }
 
             return Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200);

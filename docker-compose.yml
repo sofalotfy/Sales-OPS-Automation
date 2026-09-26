@@ -84,6 +84,9 @@ services:
       DB_DATABASE: inquiry_handler
       DB_USERNAME: rag
       DB_PASSWORD: rag
+      # Distinct cookie from the dashboard's laravel_session so both UIs can
+      # share one public domain (gateway) without clobbering each other's session.
+      SESSION_COOKIE: inquiry_session
       # PHP 8.4 built-in server multi-worker pool: a slow synchronous triage
       # (web research can take minutes) must not block health/admin traffic.
       PHP_CLI_SERVER_WORKERS: "10"
@@ -120,6 +123,72 @@ services:
       timeout: 5s
       retries: 10
     depends_on:
+      auth-service:
+        condition: service_healthy
+      work-scope-rag:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Public entry point: single ngrok tunnel fronts both UIs.
+  # /inquiry* -> inquiry-handler, everything else -> dashboard.
+  gateway:
+    image: nginx:alpine
+    container_name: gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      inquiry-handler:
+        condition: service_healthy
+      dashboard:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Async background pipeline (feature 013): Redis is the queue transport for
+  # the CRM ingest flow and the shared AI-budget/throttle counters. No host port
+  # is published — the queue is reachable only inside the compose network (R10).
+  # `--appendonly yes` survives a Redis restart so no queued job is lost.
+  redis:
+    image: redis:7-alpine
+    container_name: salesops-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Worker replica(s) processing the Redis queue (feature 013). `--timeout=600`
+  # and job `$timeout=590` sit below REDIS_QUEUE_RETRY_AFTER=900 so a long run's
+  # lease is never stolen (research R3). Scale replicas with:
+  #   docker compose up -d --scale inquiry-worker=3
+  inquiry-worker:
+    build:
+      context: ./inquiry-handler
+      dockerfile: Dockerfile
+    command: ["php", "artisan", "queue:work", "redis", "--tries=5", "--backoff=3", "--sleep=2", "--timeout=600"]
+    env_file:
+      - ./inquiry-handler/.env
+    environment:
+      AUTH_API_URL: http://auth-service:8001
+      RAG_API_URL: http://work-scope-rag:8000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: inquiry_handler
+      DB_USERNAME: rag
+      DB_PASSWORD: rag
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_CLIENT: predis
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
       auth-service:
         condition: service_healthy
       work-scope-rag:

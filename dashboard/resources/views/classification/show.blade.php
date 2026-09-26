@@ -18,9 +18,26 @@
         <div class="grid gap-6 lg:grid-cols-3">
             <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm lg:col-span-2">
                 <div class="mb-4 flex items-center justify-between">
-                    <x-classification-badge :classification="$record['classification'] ?? 'low'" />
+                    <div class="flex items-center gap-3">
+                        <x-classification-badge :classification="$record['classification'] ?? null" />
+                        @php($runStatus = (string) ($record['status'] ?? 'succeeded'))
+                        @php($inProgress = in_array($runStatus, ['queued', 'processing', 'researching', 'scope_check', 'scoring'], true))
+                        @if ($inProgress || $runStatus === 'failed')
+                            <span class="text-xs {{ $runStatus === 'failed' ? 'text-red-600' : 'text-sky-600' }}">{{ ucfirst($runStatus) }}</span>
+                        @endif
+                    </div>
                     <span class="text-sm text-slate-500">{{ \Illuminate\Support\Carbon::parse($record['created_at'])->diffForHumans() }}</span>
                 </div>
+
+                @if ($inProgress)
+                    <p class="mb-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                        This inquiry is still being processed — the classification is not available yet. Refresh to check again.
+                    </p>
+                @elseif ($runStatus === 'failed')
+                    <p class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                        This run failed. {{ (string) ($record['error'] ?? '') !== '' ? 'Error: '.$record['error'] : '' }}
+                    </p>
+                @endif
 
                 <p class="text-slate-700">{{ $record['inquiry_message'] ?? '' }}</p>
 
@@ -36,7 +53,7 @@
                     <p class="text-xs font-medium uppercase tracking-wide text-slate-400">Reasoning</p>
                     <p class="mt-1 text-sm text-slate-700">{{ $record['reasoning'] ?? '—' }}</p>
                     <p class="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">Final score</p>
-                    <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $record['final_score'] ?? 0 }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $record['final_score'] ?? null === null ? '—' : $record['final_score'] }}</p>
                 </div>
             </div>
 

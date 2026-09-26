@@ -99,6 +99,7 @@
                     <thead class="bg-slate-50">
                         <tr>
                             <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">When</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Status</th>
                             <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Classification</th>
                             <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Score</th>
                             <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Inquiry</th>
@@ -108,14 +109,19 @@
                     </thead>
                     <tbody class="divide-y divide-slate-100">
                         @foreach ($results as $result)
+                            @php($runStatus = (string) ($result['status'] ?? 'unknown'))
                             <tr>
                                 <td class="whitespace-nowrap px-4 py-3 text-slate-500">
                                     {{ \Illuminate\Support\Str::limit(\Illuminate\Support\Carbon::parse($result['created_at'])->diffForHumans(), 20) }}
                                 </td>
-                                <td class="px-4 py-3">
-                                    <x-classification-badge :classification="$result['classification'] ?? 'low'" />
+                                <td class="whitespace-nowrap px-4 py-3">
+                                    @php($inProgress = in_array($runStatus, ['queued', 'processing', 'researching', 'scope_check', 'scoring'], true))
+                                    <span class="text-xs {{ $inProgress ? 'text-sky-600' : ($runStatus === 'failed' ? 'text-red-600' : 'text-slate-500') }}">{{ ucfirst($runStatus) }}</span>
                                 </td>
-                                <td class="px-4 py-3 font-medium text-slate-900">{{ $result['final_score'] ?? 0 }}</td>
+                                <td class="px-4 py-3">
+                                    <x-classification-badge :classification="$result['classification'] ?? null" />
+                                </td>
+                                <td class="px-4 py-3 font-medium text-slate-900">{{ $result['final_score'] ?? null === null ? '—' : $result['final_score'] }}</td>
                                 <td class="max-w-xs px-4 py-3 text-slate-600">{{ $result['inquiry_message'] ?? '—' }}</td>
                                 <td class="max-w-xs px-4 py-3 text-slate-600">{{ $result['reasoning'] ?? '—' }}</td>
                                 <td class="px-4 py-3 text-right">

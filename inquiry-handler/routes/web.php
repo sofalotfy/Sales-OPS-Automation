@@ -3,6 +3,7 @@
 use App\Http\Controllers\AdminClassificationResultsController;
 use App\Http\Controllers\AdminFactorSettingsController;
 use App\Http\Controllers\AdminIndustrySectorsController;
+use App\Http\Controllers\CrmInquiryController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\InquiryController;
 use App\Http\Middleware\VerifyUpstreamToken;
@@ -26,8 +27,18 @@ Route::get('/health', HealthController::class)->name('health');
 Route::get('/', [InquiryController::class, 'show'])->name('inquiry.test-console');
 Route::get('/inquiry', [InquiryController::class, 'show']);
 Route::post('/inquiry/triage', [InquiryController::class, 'triage'])
-    ->middleware(['web.research', 'scope.gate'])
+    ->middleware(['run.begin', 'web.research', 'scope.gate'])
     ->name('inquiry.triage');
+
+// CRM ingest surface (feature 013): share-key authenticated + Redis-backed
+// per-key throttle. Enqueued runs progress via the inquiry-worker queue rep.
+Route::middleware(['crm.key', 'throttle:crm'])->group(function () {
+    Route::post('/inquiry/enqueue', [CrmInquiryController::class, 'enqueue'])
+        ->name('inquiry.enqueue');
+    Route::get('/inquiry/{id}', [CrmInquiryController::class, 'poll'])
+        ->whereNumber('id')
+        ->name('inquiry.poll');
+});
 
 Route::middleware(VerifyUpstreamToken::class)->group(function () {
     Route::get('/admin/factor-settings', [AdminFactorSettingsController::class, 'index'])

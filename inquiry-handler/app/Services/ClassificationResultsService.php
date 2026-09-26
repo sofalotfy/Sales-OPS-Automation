@@ -10,6 +10,11 @@ use Throwable;
  * (contracts/classification-reporting.md). The dashboard consumes these
  * endpoints over HTTP; it never touches the scoped store directly (SC-006).
  *
+ * Since feature 013 rows are created early and completed progressively, list()
+ * returns EVERY run (not only finished ones) with its status, and detail rows
+ * tolerate the result columns (classification, factors, score) still being
+ * null until their stage lands (the dashboard renders those as pending/—).
+ *
  * Store unavailability is NOT masked: callers (the admin controller) map
  * thrown errors to a 503 so the dashboard never mistakes a dead log for an
  * empty one.
@@ -64,8 +69,12 @@ class ClassificationResultsService
             'phone_number' => $result->phone_number,
             'company_name' => $result->company_name,
             'country_region' => $result->country_region,
-            'classification' => $result->classification->value,
+            'campaign_id' => $result->campaign_id,
+            'lead_id' => $result->lead_id,
+            'status' => $result->status?->value,
+            'classification' => $result->classification?->value,
             'final_score' => $result->final_score,
+            'error' => $result->error,
             'reasoning' => $result->reasoning,
             'factor_scores' => $result->factor_scores,
             'dropped_factors' => $result->dropped_factors,
@@ -78,6 +87,7 @@ class ClassificationResultsService
             'web_research' => $result->web_research,
             'system_prompt' => $result->system_prompt,
             'created_at' => $result->created_at?->toIso8601String(),
+            'updated_at' => $result->updated_at?->toIso8601String(),
         ];
     }
 
@@ -88,8 +98,12 @@ class ClassificationResultsService
     {
         return [
             'id' => $result->id,
-            'classification' => $result->classification->value,
+            'campaign_id' => $result->campaign_id,
+            'lead_id' => $result->lead_id,
+            'status' => $result->status?->value,
+            'classification' => $result->classification?->value,
             'final_score' => $result->final_score,
+            'error' => $result->error,
             'inquiry_message' => $this->truncate((string) $result->inquiry_message, 160),
             'first_name' => $result->first_name,
             'last_name' => $result->last_name,
@@ -98,6 +112,7 @@ class ClassificationResultsService
             'scope_check_outcome' => $result->scope_check_outcome,
             'web_research_outcome' => $result->web_research_outcome,
             'created_at' => $result->created_at?->toIso8601String(),
+            'updated_at' => $result->updated_at?->toIso8601String(),
         ];
     }
 

@@ -3,16 +3,26 @@
 namespace App\Models;
 
 use App\Enums\Classification;
+use App\Enums\InquiryRunStatus;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * Append-only per-inquiry classification log (FR-009, research R10).
+ * Per-inquiry classification log (FR-009, research R15), now lifecycle-aware
+ * (feature 013, data-model.md).
  *
- * One row per classified inquiry capturing the full run: the normalized
- * message + the seven-form contact fields, the retrieved grounding, every
- * contributing factor's score/weight/reasoning, dropped factors, the final
- * score, and the classification. Rows are never updated or deleted (audit
- * immutability); the flow only ever calls `create()`.
+ * One row per inquiry capturing the full run: the normalized message + the
+ * seven-form contact fields, the retrieved grounding, every contributing
+ * factor's score/weight/reasoning, dropped factors, the final score, and the
+ * classification. Result fields (`factor_scores`, `reasoning`, classification,
+ * etc.) are written exactly once at completion (the audit invariant); only the
+ * lifecycle columns `status`/`error` transition.
+ *
+ * For synchronous (console) runs the row is created and completed in one pass,
+ * so it is written with `status = succeeded` directly. For CRM runs (feature
+ * 013) the row is created `queued` by POST /inquiry/enqueue, moves to
+ * `processing` when a worker picks it up, and lands in `succeeded` or `failed`.
+ * `campaign_id` + `lead_id` carry the CRM's idempotency key (unique pair;
+ * Postgres NULLs are distinct, so sync rows never collide).
  *
  * Since feature 007 the row also records the scope gate's outcome for every
  * screened inquiry: `scope_check_outcome` (accept|decline|indeterminate), the
@@ -54,6 +64,10 @@ class ClassificationResult extends Model
         'web_research_reason',
         'web_research',
         'system_prompt',
+        'campaign_id',
+        'lead_id',
+        'status',
+        'error',
     ];
 
     protected function casts(): array
@@ -65,6 +79,7 @@ class ClassificationResult extends Model
             'web_research' => 'array',
             'final_score' => 'float',
             'classification' => Classification::class,
+            'status' => InquiryRunStatus::class,
         ];
     }
 }

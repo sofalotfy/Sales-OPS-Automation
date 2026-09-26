@@ -77,15 +77,17 @@ class UpstreamStubs
     /** A classification-log item shaped like inquiry-handler's summary rows. */
     public static function classificationResult(
         int $id = 1,
-        string $classification = 'low',
-        float $score = 0.0,
+        ?string $classification = 'low',
+        ?float $score = 0.0,
         string $message = 'Do you offer annual maintenance contracts?',
-        string $reasoning = 'No factors are registered; catalog is empty.',
+        ?string $reasoning = 'No factors are registered; catalog is empty.',
         string $createdAt = '2026-09-14T10:00:00+00:00',
         ?string $webResearchOutcome = null,
+        ?string $status = 'succeeded',
     ): array {
         return [
             'id' => $id,
+            'status' => $status,
             'classification' => $classification,
             'final_score' => $score,
             'inquiry_message' => $message,
@@ -102,9 +104,11 @@ class UpstreamStubs
         float $score = 72.0,
         string $message = 'Do you offer annual maintenance contracts?',
         string $reasoning = 'Matched scope.',
+        ?string $status = 'succeeded',
     ): array {
         return [
             'id' => $id,
+            'status' => $status,
             'inquiry_message' => $message,
             'first_name' => 'Ada',
             'last_name' => 'Lovelace',

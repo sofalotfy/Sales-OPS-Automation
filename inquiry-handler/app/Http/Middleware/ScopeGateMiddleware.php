@@ -3,9 +3,11 @@
 namespace App\Http\Middleware;
 
 use App\Enums\Classification;
+use App\Enums\InquiryRunStatus;
 use App\Models\ClassificationResult;
 use App\ScopeGate\ScopeCheckService;
 use App\ScopeGate\ScopeVerdict;
+use App\Services\InquiryRunService;
 use App\Triage\Exceptions\MessageValidationException;
 use App\Triage\MessageExtractor;
 use App\Triage\SystemPrompt;
@@ -33,6 +35,13 @@ use Throwable;
  * extraction/validation failure falls through so the controller emits the
  * existing 400/422 unchanged (spec Edge Cases). When scope_gate.enabled is
  * false the gate is fully bypassed and no scope_check marker is produced.
+ *
+ * Since feature 013 the run row is opened earlier (BeginInquiryRun) and this
+ * step PROGRESSIVELY writes to it: `scope_check` is set before the check runs,
+ * the scope columns land on completion, and a decline completes the same row
+ * `succeeded` with a disqualify envelope + refusal. Without a staged row
+ * (`inquiry_run_id` absent) the step keeps its pre-feature create-on-decline
+ * behavior.
  */
 class ScopeGateMiddleware
 {
@@ -40,6 +49,7 @@ class ScopeGateMiddleware
         private readonly MessageExtractor $extractor,
         private readonly ScopeCheckService $scopeCheck,
         private readonly SystemPrompt $systemPrompt,
+        private readonly InquiryRunService $runs,
     ) {}
 
     public function handle(Request $request, Closure $next): Response
@@ -60,6 +70,11 @@ class ScopeGateMiddleware
             return $next($request);
         }
 
+        $runId = $this->runId($request);
+        if ($runId !== null) {
+            $this->runs->markStatus($runId, InquiryRunStatus::ScopeCheck);
+        }
+
         $result = $this->scopeCheck->check($inquiry);
         $verdict = $result['verdict'];
 
@@ -67,6 +82,10 @@ class ScopeGateMiddleware
 
         if ($verdict->isDecline()) {
             return $this->declined($request, $inquiry, $result);
+        }
+
+        if ($runId !== null) {
+            $this->persistProgress($runId, $verdict, $result);
         }
 
         return $next($request);
@@ -89,38 +108,45 @@ class ScopeGateMiddleware
         $webResearchCriteria = $request->attributes->get('web_research_criteria', []);
         $webResearchAudit = $request->attributes->get('web_research_audit', null);
 
-        try {
-            ClassificationResult::create([
-                'inquiry_message' => $inquiry['message'],
-                'first_name' => $inquiry['first_name'],
-                'last_name' => $inquiry['last_name'],
-                'email' => $inquiry['email'],
-                'phone_number' => $inquiry['phone_number'] ?? null,
-                'company_name' => $inquiry['company_name'] ?? null,
-                'country_region' => $inquiry['country_region'] ?? null,
-                'retrieved_context' => $retrieved,
-                'factor_scores' => [],
-                'dropped_factors' => [],
-                'final_score' => 0.0,
-                'classification' => Classification::Disqualify,
-                'reasoning' => $reason,
-                'scope_check_outcome' => ScopeVerdict::DECLINE,
-                'scope_check_reason' => $reason,
-                'web_research_outcome' => $webResearchVerdict instanceof WebResearchVerdict ? $webResearchVerdict->outcome : null,
-                'web_research_reason' => $webResearchVerdict instanceof WebResearchVerdict ? $webResearchVerdict->reason : null,
-                'web_research' => $webResearchVerdict instanceof WebResearchVerdict ? [
-                    'criteria' => $webResearchCriteria,
-                    'findings' => $webResearchVerdict->research,
-                    'audit' => $webResearchAudit,
-                ] : null,
-                'system_prompt' => $this->systemPrompt->content(),
-                'refusal' => $refusal,
-            ]);
-        } catch (Throwable $e) {
-            Log::error('Failed to persist declined scope-gate record.', [
-                'message' => $inquiry['message'],
-                'error' => $e->getMessage(),
-            ]);
+        $fields = [
+            'inquiry_message' => $inquiry['message'],
+            'first_name' => $inquiry['first_name'],
+            'last_name' => $inquiry['last_name'],
+            'email' => $inquiry['email'],
+            'phone_number' => $inquiry['phone_number'] ?? null,
+            'company_name' => $inquiry['company_name'] ?? null,
+            'country_region' => $inquiry['country_region'] ?? null,
+            'retrieved_context' => $retrieved,
+            'factor_scores' => [],
+            'dropped_factors' => [],
+            'final_score' => 0.0,
+            'classification' => Classification::Disqualify,
+            'reasoning' => $reason,
+            'scope_check_outcome' => ScopeVerdict::DECLINE,
+            'scope_check_reason' => $reason,
+            'web_research_outcome' => $webResearchVerdict instanceof WebResearchVerdict ? $webResearchVerdict->outcome : null,
+            'web_research_reason' => $webResearchVerdict instanceof WebResearchVerdict ? $webResearchVerdict->reason : null,
+            'web_research' => $webResearchVerdict instanceof WebResearchVerdict ? [
+                'criteria' => $webResearchCriteria,
+                'findings' => $webResearchVerdict->research,
+                'audit' => $webResearchAudit,
+            ] : null,
+            'system_prompt' => $this->systemPrompt->content(),
+            'refusal' => $refusal,
+        ];
+
+        $runId = $this->runId($request);
+        if ($runId !== null) {
+            $this->runs->markSucceeded($runId, $fields);
+        } else {
+            try {
+                ClassificationResult::create($fields + ['status' => InquiryRunStatus::Succeeded]);
+            } catch (Throwable $e) {
+                Log::error('Failed to persist declined scope-gate record.', [
+                    'message' => $inquiry['message'],
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         $context = [
@@ -159,5 +185,26 @@ class ScopeGateMiddleware
             'reasoning' => $reason,
             'context' => $context,
         ]);
+    }
+
+    /**
+     * Land the scope columns on the staged run after an accept /
+     * indeterminate pass-through.
+     *
+     * @param  array{verdict: ScopeVerdict, retrieved: array{result_count: int, results: array<mixed>}|null}  $result
+     */
+    private function persistProgress(int $runId, ScopeVerdict $verdict, array $result): void
+    {
+        $this->runs->update($runId, [
+            'scope_check_outcome' => $verdict->outcome,
+            'scope_check_reason' => $verdict->reason,
+        ]);
+    }
+
+    private function runId(Request $request): ?int
+    {
+        $runId = $request->attributes->get('inquiry_run_id');
+
+        return is_int($runId) || ctype_digit((string) $runId) ? (int) $runId : null;
     }
 }

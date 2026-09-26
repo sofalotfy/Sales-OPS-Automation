@@ -132,11 +132,11 @@ All knobs are env-driven (see `.env.example`):
 | `SERVICE_PASSWORD`             | Service account password. Never commit a real value. |
 | `AI_API_KEY`                   | Groq API key. Never commit a real value.             |
 | `AI_API_URL`                   | AI chat-completions endpoint (default Groq, OpenAI-compatible). |
-| `AI_MODEL`                     | Default (scope/general) AI model id (default `openai/gpt-oss-20b`). |
+| `AI_MODEL`                     | Default (scope/general) AI model id (default `openai/gpt-oss-120b`). |
 | `AI_RESEARCH_MODEL`            | Model id for the research agent's layer-1 notes + final extraction (default `openai/gpt-oss-120b`). |
-| `AI_FILTER_MODEL`              | Model id for the research candidate filter (default `openai/gpt-oss-20b`). |
+| `AI_FILTER_MODEL`              | Model id for the research candidate filter (default `openai/gpt-oss-120b`). |
 | `AI_CONCURRENCY`               | Max in-flight AI requests when a step fans out, e.g. layer-1 notes batches (default 4). |
-| `AI_MAX_OUTPUT_TOKENS`         | Cap on generated tokens per AI call (default 4096).  |
+| `AI_MAX_OUTPUT_TOKENS`         | Cap on generated tokens per AI call (default 2048).  |
 | `AI_TIMEOUT`                   | Per-request AI HTTP timeout in seconds (default 90).   |
 | `WEB_RESEARCH_MAX_CANDIDATES`   | Candidate results the agent considers before the AI filter (default 40, i.e. everything the provider returns). |
 | `WEB_RESEARCH_MAX_SOURCES`      | Kept sources the agent fetches and cites (default 40). |
