@@ -8,6 +8,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
@@ -118,6 +119,8 @@ class AiCallingService
         $token = $this->guard->start();
 
         if ($token === null) {
+            Log::warning('AI guard budget is full; the analysis call failed open (not sent).');
+
             return null;
         }
 
@@ -149,9 +152,14 @@ class AiCallingService
                 if ($this->needsPlainRetry($response)) {
                     $response = $this->call($job, $key, withJsonMode: false);
                 }
-            } catch (ConnectionException) {
+            } catch (ConnectionException $e) {
                 // A slammed/slow provider hangs rather than failing fast; do not
                 // multiply a long wait by retrying timeouts — fail open.
+                Log::warning('AI single completion aborted on a connection error (fail-open).', [
+                    'model' => $model,
+                    'error' => $e->getMessage(),
+                ]);
+
                 return null;
             }
 
@@ -163,22 +171,47 @@ class AiCallingService
             // back in milliseconds or seconds (TPM/RPM ceilings), so a short
             // backoff costs almost nothing while riding through the free tier's
             // transient 413 (token-per-minute) and 429 bursts.
-            if (in_array($response->status(), [413, 429, 500, 502, 503, 504], true) && $attempt < self::MAX_RETRIES) {
+            $isDailyQuota = $this->isDailyTokenQuotaExhausted($response);
+
+            if ($isDailyQuota) {
+                Log::error('AI provider daily token quota (TPD) exhausted; analysis calls fail open until the quota resets.');
+            }
+
+            if (in_array($response->status(), [413, 429, 500, 502, 503, 504], true)
+                && $attempt < self::MAX_RETRIES
+                && ! $isDailyQuota) {
                 usleep(min(30, $this->retryAfterSeconds($response) ?: $attempt * 2) * 1_000_000);
 
                 continue;
             }
 
+            $this->logSingleCompletionFailure($response, $model);
+
             return null;
         }
 
-        $content = $response->json('choices.0.message.content');
+        $content = $response?->json('choices.0.message.content');
 
         if (! is_string($content)) {
+            $this->logSingleCompletionFailure($response, $model);
+
             return null;
         }
 
         return $this->extractJsonArray($content);
+    }
+
+    /**
+     * Attribute a failed single completion instead of dropping it silently.
+     */
+    private function logSingleCompletionFailure(?Response $response, ?string $model): void
+    {
+        Log::warning('AI single completion failed (fail-open).', [
+            'model' => $model,
+            'status' => $response?->status(),
+            'retry_after' => $response instanceof Response ? $this->retryAfterSeconds($response) : 0,
+            'body' => $response instanceof Response ? mb_substr((string) $response->body(), 0, 200) : '',
+        ]);
     }
 
     /**
@@ -225,18 +258,79 @@ class AiCallingService
         // instead of spending a burst the provider would reject. Uncounted
         // calls (guard off/unavailable) still send without a token.
         $reservedTokens = [];
+        $sent = [];
+        $blocked = [];
 
         foreach ($pending as $jobKey => $job) {
             $token = $this->guard->start();
 
             if ($token === null) {
-                unset($pending[$jobKey]);
+                $blocked[$jobKey] = $job;
 
                 continue;
             }
 
             if ($token !== '') {
                 $reservedTokens[$jobKey] = $token;
+            }
+
+            $sent[$jobKey] = $job;
+        }
+
+        if ($blocked !== []) {
+            Log::info('AI guard budget is full; analysis jobs are deferred until a slot frees.', [
+                'jobs' => array_keys($blocked),
+                'rpm_cap' => config('services.ai.guard_max_per_min'),
+                'in_flight_cap' => config('services.ai.guard_max_inflight'),
+            ]);
+        }
+
+        // Keep fighting for a slot instead of silently dropping work: a batch
+        // that cannot reserve a slot would otherwise fail open and surface as
+        // a "batch failed" in research. The RPM window is 60s, so a bounded
+        // wait (default 90s) lets the run coast over the boundary rather than
+        // losing lanes. Only lanes still blocked past the cap fail open.
+        $waitStarted = microtime(true);
+        $waitCap = max(0, (float) config('services.ai.guard_wait_seconds', 90));
+
+        while ($blocked !== [] && microtime(true) - $waitStarted < $waitCap) {
+            usleep(1_000_000);
+
+            // Probe without spending the RPM budget we are waiting on: a
+            // per-second start() storm would keep the window pinned at the
+            // ceiling instead of draining naturally with time.
+            if (! $this->guard->hasCapacity()) {
+                continue;
+            }
+
+            foreach ($blocked as $jobKey => $job) {
+                $token = $this->guard->start();
+
+                if ($token === null) {
+                    continue;
+                }
+
+                unset($blocked[$jobKey]);
+                $pending[$jobKey] = $job;
+
+                if ($token !== '') {
+                    $reservedTokens[$jobKey] = $token;
+                }
+
+                $sent[$jobKey] = $job;
+            }
+        }
+
+        if ($blocked !== []) {
+            Log::warning('AI guard budget stayed exhausted; analysis jobs failed open (never sent).', [
+                'jobs' => array_keys($blocked),
+                'model' => $blocked[array_key_first($blocked)]['model'] ?? null,
+                'rpm_cap' => config('services.ai.guard_max_per_min'),
+                'in_flight_cap' => config('services.ai.guard_max_inflight'),
+            ]);
+
+            foreach ($blocked as $jobKey => $job) {
+                unset($pending[$jobKey]);
             }
         }
 
@@ -246,6 +340,8 @@ class AiCallingService
 
         $concurrency = max(1, (int) config('services.ai.concurrency', 4));
         $timeout = (int) config('services.ai.timeout', 90);
+        $lastResponse = [];
+        $dailyQuota = false;
 
         for ($attempt = 1; $pending !== [] && $attempt <= self::MAX_RETRIES; $attempt++) {
             try {
@@ -285,9 +381,25 @@ class AiCallingService
 
                 $job = $pending[$jobKey];
 
+                $lastResponse[$jobKey] = $response instanceof Response
+                    ? [
+                        'status' => $response->status(),
+                        'retry_after' => $this->retryAfterSeconds($response),
+                        'body' => mb_substr((string) $response->body(), 0, 200),
+                    ]
+                    : ['status' => 'n/a', 'retry_after' => 0, 'body' => ''];
+
+                $isDailyQuota = $response instanceof Response
+                    && $this->isDailyTokenQuotaExhausted($response);
+
+                if ($isDailyQuota) {
+                    $dailyQuota = true;
+                }
+
                 if ($response instanceof Response
                     && in_array($response->status(), [413, 429, 500, 502, 503, 504], true)
-                    && $attempt < self::MAX_RETRIES) {
+                    && $attempt < self::MAX_RETRIES
+                    && ! $isDailyQuota) {
                     $retry[$jobKey] = $job;
                     $retryAfter = max($retryAfter, $this->retryAfterSeconds($response));
 
@@ -313,6 +425,36 @@ class AiCallingService
         // broke on a transport failure) must still release their slot.
         foreach ($reservedTokens as $token) {
             $this->guard->finish($token);
+        }
+
+        // A hard daily-quota block (Groq "tokens per day") is not time-boxed
+        // like TPM — retrying it wastes the remains of the minute. Surface it
+        // once so operators read the real cause instead of a silent drop.
+        if ($dailyQuota) {
+            Log::error('AI provider daily token quota (TPD) exhausted; analysis jobs fail open until the quota resets.');
+        }
+
+        // Jobs that were actually sent yet resolved to null (retry exhaustion,
+        // provider rejection, or unparseable JSON) get logged so a "batch
+        // failed" in research is attributable instead of silent. Lanes that
+        // never cleared the guard were logged above and are not re-reported.
+        $unresolved = [];
+
+        foreach ($sent as $jobKey => $job) {
+            if (($results[$jobKey] ?? null) === null) {
+                $unresolved[$jobKey] = $job;
+            }
+        }
+
+        if ($unresolved !== []) {
+            Log::warning('AI analysis jobs stayed unresolved after retries (fail-open).', [
+                'jobs' => array_keys($unresolved),
+                'model' => $unresolved[array_key_first($unresolved)]['model'] ?? null,
+                'responses' => array_map(
+                    fn (string $jobKey) => $lastResponse[$jobKey] ?? null,
+                    array_keys($unresolved),
+                ),
+            ]);
         }
 
         return $results;
@@ -399,6 +541,20 @@ class AiCallingService
         }
 
         return min((int) $value, 30);
+    }
+
+    /**
+     * Whether a 429 is a hard daily quota block ("tokens per day"/TPD) rather
+     * than the transient per-minute throttle. TPD only resets on the quota
+     * window (usually midnight), so retrying it burns calls without recovery.
+     */
+    private function isDailyTokenQuotaExhausted(Response $response): bool
+    {
+        if ($response->status() !== 429) {
+            return false;
+        }
+
+        return preg_match('/tokens per day|\(tpd\)|per day|daily( quota)?/i', (string) $response->body()) === 1;
     }
 
     /**

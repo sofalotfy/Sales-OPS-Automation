@@ -100,6 +100,41 @@ class AiThroughputGuardTest extends TestCase
         $this->assertSame(1, $this->countMethod($redis, 'decr', $this->windowKey()));
     }
 
+    public function test_has_capacity_reads_budgets_without_spending(): void
+    {
+        config(['services.ai.guard_enabled' => true]);
+        config(['services.ai.guard_max_per_min' => 10]);
+        config(['services.ai.guard_max_inflight' => 4]);
+        $redis = new FakeRedis([
+            'get:'.$this->windowKey() => [3],
+            'get:ai-inflight' => [1],
+        ]);
+
+        $guard = $this->guard($redis);
+
+        $this->assertTrue($guard->hasCapacity());
+
+        // The probe must not mutate either budget: GET only, no incr/expire.
+        $this->assertSame(0, $this->countMethod($redis, 'incr', $this->windowKey()));
+        $this->assertSame(0, $this->countMethod($redis, 'incr', 'ai-inflight'));
+        $this->assertSame(2, $this->countMethod($redis, 'get', $this->windowKey()) + $this->countMethod($redis, 'get', 'ai-inflight'));
+    }
+
+    public function test_has_capacity_returns_false_when_a_budget_is_at_the_cap(): void
+    {
+        config(['services.ai.guard_enabled' => true]);
+        config(['services.ai.guard_max_per_min' => 10]);
+        config(['services.ai.guard_max_inflight' => 4]);
+        $redis = new FakeRedis([
+            'get:'.$this->windowKey() => [10],
+            'get:ai-inflight' => [0],
+        ]);
+
+        $guard = $this->guard($redis);
+
+        $this->assertFalse($guard->hasCapacity());
+    }
+
     public function test_finish_releases_the_inflight_slot(): void
     {
         config(['services.ai.guard_enabled' => true]);

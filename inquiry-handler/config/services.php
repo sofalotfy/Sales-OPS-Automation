@@ -58,9 +58,12 @@ return [
         // candidate URLs so it does not need the strongest weights.
         'filter_model' => env('AI_FILTER_MODEL', 'openai/gpt-oss-120b'),
         // Max concurrent in-flight AI requests when a step fans out (layer-1
-        // notes batches). Bounded by Groq free-tier limits (30 RPM, 8K TPM);
-        // bursts above the token ceiling self-throttle via 429 + retry-after.
-        'concurrency' => max(1, (int) env('AI_CONCURRENCY', 4)),
+        // notes batches). Kept at 2 so a single concurrent wave stays under the
+        // Groq free tier's 8K-TPM window (each ~8K-char notes call consumes
+        // ≈3K input+output tokens): 2 × 3K < 8K, while 4 × 3K blew the budget
+        // on every multi-page run. Overshoot self-throttles via 413/429 +
+        // retry-after.
+        'concurrency' => max(1, (int) env('AI_CONCURRENCY', 2)),
         // Cap on generated tokens per call. gpt-oss defaults to 65K output,
         // which would burn a free tier's daily budget on one summary. Kept
         // well under the 8K-tokens-per-minute Groq window so a single
@@ -73,9 +76,18 @@ return [
         // requests-per-minute ceiling plus an in-flight cap protecting the
         // provider's free-tier limits. Stats and gates live in Redis so every
         // inquiry-worker shares one budget. Off when AI_GUARD_ENABLED=false.
+        // NOTE: the real Groq key ceiling is ≈1000 RPM / 8K TPM — tokens, not
+        // requests, bind. RPM defaults high so one research-heavy run (up to
+        // ~40 note batches × 2 attempts + filter + summary) never trips a
+        // phantom request wall; token pacing is handled by `concurrency`.
         'guard_enabled' => (bool) env('AI_GUARD_ENABLED', true),
-        'guard_max_per_min' => max(1, (int) env('AI_MAX_PER_MIN', 30)),
+        'guard_max_per_min' => max(1, (int) env('AI_MAX_PER_MIN', 150)),
         'guard_max_inflight' => max(1, (int) env('AI_MAX_INFLIGHT', 4)),
+
+        // How long completeMany() will wait (seconds) for a guard slot when the
+        // RPM/in-flight budget is momentarily full, instead of failing a batch
+        // open. 90s spans one 60s RPM window plus margin.
+        'guard_wait_seconds' => max(0, (float) env('AI_GUARD_WAIT_SECONDS', 90)),
     ],
 
     'service_account' => [

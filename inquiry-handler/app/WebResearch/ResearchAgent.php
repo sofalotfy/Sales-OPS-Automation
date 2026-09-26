@@ -3,6 +3,7 @@
 namespace App\WebResearch;
 
 use App\Services\AiCallingService;
+use Illuminate\Support\Facades\Log;
 
 /**
  * AI research agent: turns raw web-research candidates into one filtered,
@@ -599,9 +600,15 @@ PROMPT;
         if ($this->documentsLength($fetched) <= $max) {
             $summary = $this->summarizePasses($criteria, $fetched);
 
-            return $summary === null
-                ? null
-                : $summary + ['partial' => false, 'documents' => $fetched];
+            if ($summary === null) {
+                Log::warning('Research extraction produced no notes: the single-pass summarization failed.', [
+                    'pages' => count($fetched),
+                ]);
+
+                return null;
+            }
+
+            return $summary + ['partial' => false, 'documents' => $fetched];
         }
 
         // Layer 1: one notes call per batch, fired CONCURRENTLY so independent
@@ -666,6 +673,12 @@ PROMPT;
         }
 
         if ($succeededBatches === 0) {
+            Log::warning('Research extraction produced no notes: every note batch failed or was skipped.', [
+                'failed_batches' => $failedBatches,
+                'skipped_batches' => $skippedBatches,
+                'total_batches' => count($batches),
+            ]);
+
             return null;
         }
 
@@ -677,6 +690,14 @@ PROMPT;
                 .($skippedBatches > 0 ? "{$skippedBatches} skipped for time" : '')
                 .'), so the profile may be incomplete.'
             : null;
+
+        if ($incomplete) {
+            Log::warning('Research profile incomplete: some note batches were not analysed.', [
+                'failed_batches' => $failedBatches,
+                'skipped_batches' => $skippedBatches,
+                'total_batches' => count($batches),
+            ]);
+        }
 
         // Every analysed page was irrelevant to the target.
         if ($notes === []) {

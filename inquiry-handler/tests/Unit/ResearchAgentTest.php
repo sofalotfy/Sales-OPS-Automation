@@ -7,6 +7,7 @@ use App\WebResearch\PageFetcher;
 use App\WebResearch\ResearchAgent;
 use App\WebResearch\ResearchOutcome;
 use App\WebResearch\ResearchResult;
+use Illuminate\Support\Facades\Log;
 use Mockery;
 use Tests\TestCase;
 
@@ -19,6 +20,8 @@ use Tests\TestCase;
  */
 class ResearchAgentTest extends TestCase
 {
+    private array $capturedLogs = [];
+
     /** @var array<int, array{system: string, user: string, model: string}> */
     private array $aiCalls = [];
 
@@ -745,6 +748,7 @@ class ResearchAgentTest extends TestCase
     {
         config()->set('web_research.summary_max_input_chars', 1000);
         config()->set('web_research.note_attempts', 1);
+        $this->captureLogs();
 
         $good = 'https://good.example';
         $bad = 'https://bad.example';
@@ -785,5 +789,28 @@ class ResearchAgentTest extends TestCase
         $this->assertSame(ResearchOutcome::Partial, $result->outcome);
         $this->assertStringContainsString('1 batch(es) failed', (string) $result->limitations);
         $this->assertSame([['title' => 'Good', 'url' => $good]], $result->sources);
+
+        $found = false;
+
+        foreach ($this->capturedLogs as $entry) {
+            if ($entry['level'] === 'warning'
+                && str_contains($entry['message'], 'Research profile incomplete')
+                && ($entry['context']['failed_batches'] ?? null) === 1) {
+                $found = true;
+            }
+        }
+
+        $this->assertTrue($found);
+    }
+
+    private function captureLogs(): void
+    {
+        Log::listen(function ($event) {
+            $this->capturedLogs[] = [
+                'level' => $event->level,
+                'message' => $event->message,
+                'context' => $event->context,
+            ];
+        });
     }
 }

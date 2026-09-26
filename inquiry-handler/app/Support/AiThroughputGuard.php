@@ -108,6 +108,32 @@ class AiThroughputGuard
         }
     }
 
+    /**
+     * Non-mutating capacity probe: whether a fresh slot is currently available.
+     *
+     * Reads the budgets with GET only, so polling callers can wait for a free
+     * slot without spending the RPM counter they are waiting on (a start()-per
+     * second poll would keep the window pinned at the ceiling forever).
+     *
+     * @return bool true when under both caps, or the guard is off/unavailable
+     */
+    public function hasCapacity(): bool
+    {
+        if (! $this->enabled()) {
+            return true;
+        }
+
+        try {
+            $counterKey = 'ai-rpm:'.now()->format('YmdHi');
+            $rpm = (int) ($this->connection()->command('get', [$counterKey]) ?? 0);
+            $inflight = (int) ($this->connection()->command('get', ['ai-inflight']) ?? 0);
+
+            return $rpm < $this->maxPerMin() && $inflight < $this->maxInflight();
+        } catch (Throwable) {
+            return true;
+        }
+    }
+
     private function connection(): Connection
     {
         // Resolved lazily (and only once a guarded call is actually being

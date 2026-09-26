@@ -8,6 +8,7 @@ use App\Triage\PromptBuilder;
 use GuzzleHttp\Exception\ConnectException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
 /**
@@ -21,6 +22,8 @@ use Tests\TestCase;
 class AiCallingServiceTest extends TestCase
 {
     private AiCallingService $service;
+
+    private array $capturedLogs = [];
 
     protected function setUp(): void
     {
@@ -67,6 +70,50 @@ class AiCallingServiceTest extends TestCase
 
         $this->assertNull($this->service->complete('Sys', 'User'));
         Http::assertSentCount(1);
+    }
+
+    public function test_complete_reports_a_daily_quota_429_without_retrying(): void
+    {
+        Http::fake([
+            'ai.test/*' => Http::response([
+                'error' => ['message' => 'Rate limit reached for model on tokens per day (TPD): Limit 200000, Used 200000.'],
+            ], 429),
+        ]);
+        $this->captureLogs();
+
+        $this->assertNull($this->service->complete('Sys', 'User'));
+
+        Http::assertSentCount(1);
+        $this->assertTrue($this->capturedLogHas('daily token quota (TPD) exhausted', 'error'));
+        $this->assertTrue($this->capturedLogHas('single completion failed (fail-open)', 'warning'));
+    }
+
+    public function test_complete_logs_the_final_429_after_retries(): void
+    {
+        Http::fake([
+            'ai.test/*' => Http::response(['error' => ['code' => '1305']], 429),
+        ]);
+        $this->captureLogs();
+
+        $this->assertNull($this->service->complete('Sys', 'User'));
+
+        Http::assertSentCount(3);
+        $this->assertFalse($this->capturedLogHas('daily token quota (TPD) exhausted', 'error'));
+        $this->assertTrue($this->capturedLogHas('single completion failed (fail-open)', 'warning'));
+    }
+
+    public function test_complete_logs_when_the_guard_budget_is_full(): void
+    {
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturn(null);
+        $guard->method('finish');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        $this->captureLogs();
+
+        $this->assertNull($service->complete('Sys', 'User'));
+
+        Http::assertSentCount(0);
+        $this->assertTrue($this->capturedLogHas('guard budget is full', 'warning'));
     }
 
     public function test_json_mode_refused_with_400_json_validate_failed_retries_in_plain_mode(): void
@@ -246,6 +293,77 @@ class AiCallingServiceTest extends TestCase
         });
     }
 
+    public function test_complete_many_waits_for_a_guard_slot_then_sends(): void
+    {
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')
+            ->willReturnOnConsecutiveCalls(null, 'reserved', 'reserved');
+        $guard->method('hasCapacity')->willReturn(true);
+        $guard->method('finish');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        config(['services.ai.key' => 'test-key']);
+        Http::fake(['ai.test/*' => Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200)]);
+        $this->captureLogs();
+
+        $result = $service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A'],
+            ['key' => 'b', 'system' => 'S', 'user' => 'B'],
+        ]);
+
+        $this->assertNotNull($result['a'] ?? null);
+        $this->assertNotNull($result['b'] ?? null);
+        Http::assertSentCount(2);
+        $this->assertTrue($this->capturedLogHas('deferred until a slot frees', 'info'));
+    }
+
+    public function test_complete_many_logs_jobs_still_blocked_after_the_wait_cap(): void
+    {
+        config(['services.ai.guard_wait_seconds' => 0]);
+        $service = new AiCallingService(new PromptBuilder('scope'), $this->createStub(AiThroughputGuard::class));
+        config(['services.ai.key' => 'test-key']);
+        Http::fake();
+        $this->captureLogs();
+
+        $result = $service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A'],
+            ['key' => 'b', 'system' => 'S', 'user' => 'B'],
+        ]);
+
+        $this->assertNull($result['a']);
+        $this->assertNull($result['b']);
+        Http::assertNothingSent();
+        $this->assertTrue($this->capturedLogHas('stayed exhausted'));
+    }
+
+    public function test_complete_many_logs_jobs_that_send_but_stay_unresolved(): void
+    {
+        Http::fake(['ai.test/*' => Http::response(['error' => ['message' => 'Bad request.']], 400)]);
+        $this->captureLogs();
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A'],
+        ]);
+
+        $this->assertNull($result['a']);
+        $this->assertTrue($this->capturedLogHas('stayed unresolved'));
+    }
+
+    public function test_complete_many_does_not_retry_a_daily_quota_429(): void
+    {
+        Http::fake(['ai.test/*' => Http::response([
+            'error' => ['message' => 'Rate limit reached for model on tokens per day (TPD): Limit 200000, Used 198609, Retry after 30s.'],
+        ], 429)]);
+        $this->captureLogs();
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A'],
+        ]);
+
+        $this->assertNull($result['a']);
+        Http::assertSentCount(1);
+        $this->assertTrue($this->capturedLogHas('daily token quota (TPD) exhausted', 'error'));
+    }
+
     public function test_complete_many_retries_only_the_rate_limited_job(): void
     {
         $slowCalls = 0;
@@ -344,5 +462,27 @@ class AiCallingServiceTest extends TestCase
 
         $this->assertSame(['a' => null, 'b' => null], $result);
         Http::assertNothingSent();
+    }
+
+    private function captureLogs(): void
+    {
+        Log::listen(function ($event) {
+            $this->capturedLogs[] = [
+                'level' => $event->level,
+                'message' => $event->message,
+                'context' => $event->context,
+            ];
+        });
+    }
+
+    private function capturedLogHas(string $needle, string $level = 'warning'): bool
+    {
+        foreach ($this->capturedLogs as $entry) {
+            if ($entry['level'] === $level && str_contains((string) $entry['message'], $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
