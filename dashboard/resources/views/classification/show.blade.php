@@ -91,7 +91,14 @@
                 @else
                     <ul class="mt-2 space-y-1">
                         @foreach ($record['dropped_factors'] as $dropped)
-                            <li class="text-sm text-slate-600">{{ $dropped }}</li>
+                            @php($droppedName = is_array($dropped) ? (string) ($dropped['name'] ?? '') : (string) $dropped)
+                            @php($droppedReason = is_array($dropped) ? (string) ($dropped['reason'] ?? '') : '')
+                            <li class="text-sm text-slate-600">
+                                <span class="font-medium text-slate-700">{{ $droppedName }}</span>
+                                @if ($droppedReason !== '')
+                                    <span class="text-slate-500">— {{ $droppedReason }}</span>
+                                @endif
+                            </li>
                         @endforeach
                     </ul>
                 @endif

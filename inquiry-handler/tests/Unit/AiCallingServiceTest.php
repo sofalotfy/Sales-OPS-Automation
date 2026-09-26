@@ -104,8 +104,11 @@ class AiCallingServiceTest extends TestCase
 
     public function test_complete_logs_when_the_guard_budget_is_full(): void
     {
+        // No wait budget: the guard is exhausted, so the call fails open at once.
+        config(['services.ai.guard_wait_seconds' => 0]);
         $guard = $this->createMock(AiThroughputGuard::class);
         $guard->method('start')->willReturn(null);
+        $guard->method('hasCapacity')->willReturn(false);
         $guard->method('finish');
         $service = new AiCallingService(new PromptBuilder('scope'), $guard);
         $this->captureLogs();
@@ -114,6 +117,127 @@ class AiCallingServiceTest extends TestCase
 
         Http::assertSentCount(0);
         $this->assertTrue($this->capturedLogHas('guard budget is full', 'warning'));
+    }
+
+    public function test_complete_waits_for_a_guard_slot_and_then_sends(): void
+    {
+        // The budgets are momentarily full (a paced batch wave just drained
+        // them): complete() must wait for the next window instead of dropping
+        // the call, otherwise a chunked extraction dies right after the notes.
+        config(['services.ai.guard_wait_seconds' => 5]);
+        $reservations = 0;
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturnCallback(function (int $tokens = 0) use (&$reservations) {
+            $reservations++;
+
+            return $reservations > 1 ? 'reserved' : null;
+        });
+        $guard->method('hasCapacity')->willReturn(true);
+        $guard->method('finish');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake(['ai.test/*' => Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200)]);
+
+        $this->assertSame(['ok' => true], $service->complete('Sys', 'User'));
+        Http::assertSentCount(1);
+    }
+
+    public function test_complete_does_not_wait_for_a_call_that_can_never_fit_the_token_cap(): void
+    {
+        // The call's own size exceeds the per-minute budget, so waiting could
+        // never help: fail open immediately rather than burn the whole budget.
+        config(['services.ai.guard_wait_seconds' => 60]);
+        config(['services.ai.guard_max_tokens_per_min' => 10]);
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturn(null);
+        $guard->method('hasCapacity')->willReturn(false);
+        $guard->method('finish');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        $this->captureLogs();
+
+        $started = microtime(true);
+
+        $this->assertNull($service->complete('Sys', 'User'));
+
+        $this->assertLessThan(2.0, microtime(true) - $started);
+        Http::assertSentCount(0);
+        $this->assertTrue($this->capturedLogHas('guard budget is full', 'warning'));
+    }
+
+    public function test_complete_books_an_estimated_token_budget_and_keeps_it_when_billed(): void
+    {
+        $booked = [];
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturnCallback(function (int $tokens = 0) use (&$booked) {
+            $booked[] = $tokens;
+
+            return 'reserved';
+        });
+        $guard->method('finish');
+        // A billed completion consumed real tokens: no refund.
+        $guard->expects($this->never())->method('refund');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake([
+            'ai.test/*' => Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200),
+        ]);
+
+        $this->assertSame(['ok' => true], $service->complete('Sys', 'User'));
+
+        $this->assertCount(1, $booked);
+        $this->assertGreaterThan(0, $booked[0]);
+    }
+
+    public function test_complete_refunds_the_token_booking_when_every_attempt_was_rejected(): void
+    {
+        $refunds = [];
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturn('reserved');
+        $guard->method('finish');
+        $guard->method('refund')->willReturnCallback(function (int $tokens = 0) use (&$refunds) {
+            $refunds[] = $tokens;
+        });
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake([
+            // A 429/5xx rejection never reached the model, so the booked
+            // tokens are returned to the minute window for the next job.
+            'ai.test/*' => Http::response(['error' => ['code' => '1305']], 429),
+        ]);
+
+        $this->assertNull($service->complete('Sys', 'User'));
+
+        Http::assertSentCount(3);
+        $this->assertCount(1, $refunds);
+        $this->assertGreaterThan(0, $refunds[0]);
+    }
+
+    public function test_complete_many_refunds_only_the_never_billed_jobs(): void
+    {
+        $refunds = [];
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturn('reserved');
+        $guard->method('finish');
+        $guard->method('refund')->willReturnCallback(function (int $tokens = 0) use (&$refunds) {
+            $refunds[] = $tokens;
+        });
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake(function (Request $request) {
+            $user = $request['messages'][1]['content'];
+
+            // Prompt A is billed (200); Prompt B is hard-rejected (400) and
+            // resolves to null without ever reaching the model.
+            return $user === 'Prompt A'
+                ? Http::response(['choices' => [['message' => ['content' => '{"a":1}']]]], 200)
+                : Http::response(['error' => ['message' => 'Bad request.']], 400);
+        });
+
+        $result = $service->completeMany([
+            ['key' => 'batch-0', 'system' => 'S', 'user' => 'Prompt A'],
+            ['key' => 'batch-1', 'system' => 'S', 'user' => 'Prompt B'],
+        ]);
+
+        $this->assertSame(['batch-0' => ['a' => 1], 'batch-1' => null], $result);
+        // Only the rejected job's booking is returned.
+        $this->assertCount(1, $refunds);
+        $this->assertGreaterThan(0, $refunds[0]);
     }
 
     public function test_json_mode_refused_with_400_json_validate_failed_retries_in_plain_mode(): void
@@ -313,7 +437,42 @@ class AiCallingServiceTest extends TestCase
         $this->assertNotNull($result['a'] ?? null);
         $this->assertNotNull($result['b'] ?? null);
         Http::assertSentCount(2);
-        $this->assertTrue($this->capturedLogHas('deferred until a slot frees', 'info'));
+        $this->assertTrue($this->capturedLogHas('deferred to the next window', 'info'));
+    }
+
+    public function test_complete_many_paces_jobs_across_waves_when_only_one_fits_per_window(): void
+    {
+        // A wave may only contain what the shared budgets allow: the guard
+        // grants exactly one reservation per round, so the other jobs must
+        // ride later waves instead of being dropped (or dumped together into
+        // one over-budget burst).
+        config(['services.ai.guard_wait_seconds' => 60]);
+        $reservations = 0;
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturnCallback(function (int $tokens = 0) use (&$reservations) {
+            $reservations++;
+
+            // Every wave offers its still-pending jobs in order, so granting
+            // the 1st call of each 3-call group admits exactly one job per wave.
+            return $reservations % 3 === 1 ? 'reserved' : null;
+        });
+        $guard->method('hasCapacity')->willReturn(true);
+        $guard->method('finish');
+        $guard->method('refund');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake(['ai.test/*' => Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200)]);
+
+        $result = $service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A'],
+            ['key' => 'b', 'system' => 'S', 'user' => 'B'],
+            ['key' => 'c', 'system' => 'S', 'user' => 'C'],
+        ]);
+
+        $this->assertSame(
+            ['a' => ['ok' => true], 'b' => ['ok' => true], 'c' => ['ok' => true]],
+            $result,
+        );
+        Http::assertSentCount(3);
     }
 
     public function test_complete_many_logs_jobs_still_blocked_after_the_wait_cap(): void
@@ -362,6 +521,30 @@ class AiCallingServiceTest extends TestCase
         $this->assertNull($result['a']);
         Http::assertSentCount(1);
         $this->assertTrue($this->capturedLogHas('daily token quota (TPD) exhausted', 'error'));
+    }
+
+    public function test_complete_many_round_retries_a_json_validate_failed_400(): void
+    {
+        $calls = 0;
+        Http::fake(function (Request $request) use (&$calls) {
+            $calls++;
+
+            if ($calls < 3) {
+                return Http::response([
+                    'error' => ['message' => 'Failed to validate JSON.', 'code' => 'json_validate_failed', 'failed_generation' => ''],
+                ], 400);
+            }
+
+            return Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200);
+        });
+        $this->captureLogs();
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A'],
+        ]);
+
+        $this->assertSame(['ok' => true], $result['a']);
+        Http::assertSentCount(3);
     }
 
     public function test_complete_many_retries_only_the_rate_limited_job(): void
@@ -448,6 +631,30 @@ class AiCallingServiceTest extends TestCase
 
         $this->assertNull($result['down']);
         $this->assertSame(['ok' => true], $result['ok']);
+    }
+
+    public function test_complete_many_logs_each_batch_request_with_payload_preview(): void
+    {
+        Http::fake(['ai.test/*' => Http::response(['choices' => [['message' => ['content' => '{"ok":true}']]]], 200)]);
+        $this->captureLogs();
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'Prompt A', 'max_tokens' => 512],
+            ['key' => 'b', 'system' => 'S', 'user' => 'Prompt B'],
+        ]);
+
+        $this->assertSame(['ok' => true], $result['a']);
+        $this->assertSame(['ok' => true], $result['b']);
+
+        $batches = array_filter(
+            $this->capturedLogs,
+            fn (array $entry) => $entry['level'] === 'info'
+                && str_contains((string) $entry['message'], 'AI request (pool batch)'),
+        );
+
+        $this->assertCount(2, $batches);
+        $this->assertTrue($batches[array_key_first($batches)]['context']['json_mode']);
+        $this->assertSame('Prompt A', $batches[array_key_first($batches)]['context']['user_preview']);
     }
 
     public function test_complete_many_missing_key_fails_open_without_any_request(): void

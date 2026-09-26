@@ -76,13 +76,17 @@ return [
         // requests-per-minute ceiling plus an in-flight cap protecting the
         // provider's free-tier limits. Stats and gates live in Redis so every
         // inquiry-worker shares one budget. Off when AI_GUARD_ENABLED=false.
-        // NOTE: the real Groq key ceiling is ≈1000 RPM / 8K TPM — tokens, not
-        // requests, bind. RPM defaults high so one research-heavy run (up to
-        // ~40 note batches × 2 attempts + filter + summary) never trips a
-        // phantom request wall; token pacing is handled by `concurrency`.
+        // NOTE: the real Groq free-tier ceiling is ≈8K tokens per minute per
+        // model — tokens, not requests, bind (a single notes completion is
+        // ~3-4K tokens). The guard therefore also charges an estimated
+        // token-per-minute budget (input chars/4 + output cap) so concurrent
+        // batches pace to the provider window instead of blasting it in one
+        // wave. Set AI_MAX_TOKENS_PER_MIN just under the provider's cap so the
+        // guard throttles before the provider 429s.
         'guard_enabled' => (bool) env('AI_GUARD_ENABLED', true),
         'guard_max_per_min' => max(1, (int) env('AI_MAX_PER_MIN', 150)),
         'guard_max_inflight' => max(1, (int) env('AI_MAX_INFLIGHT', 4)),
+        'guard_max_tokens_per_min' => max(1, (int) env('AI_MAX_TOKENS_PER_MIN', 7000)),
 
         // How long completeMany() will wait (seconds) for a guard slot when the
         // RPM/in-flight budget is momentarily full, instead of failing a batch

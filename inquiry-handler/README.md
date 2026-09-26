@@ -138,10 +138,11 @@ All knobs are env-driven (see `.env.example`):
 | `AI_CONCURRENCY`               | Max in-flight AI requests when a step fans out, e.g. layer-1 notes batches (default 2). |
 | `AI_MAX_OUTPUT_TOKENS`         | Cap on generated tokens per AI call (default 2048).  |
 | `AI_TIMEOUT`                   | Per-request AI HTTP timeout in seconds (default 90).   |
-| `AI_GUARD_ENABLED`             | Shared RPM + in-flight budget across all workers (default `true`). |
+| `AI_GUARD_ENABLED`             | Shared RPM + in-flight + token-per-minute budget across all workers (default `true`). |
 | `AI_MAX_PER_MIN`               | Shared RPM cap (default 150; a sanity bound, not a wall — see `.env.example`). |
 | `AI_MAX_INFLIGHT`              | Shared in-flight cap across workers (default 4).     |
-| `AI_GUARD_WAIT_SECONDS`        | How long a deferred job waits for a freed guard slot before failing open (default 90). |
+| `AI_MAX_TOKENS_PER_MIN`        | Estimated shared token-per-minute budget (default 7000; charged before each call as input chars/4 + output cap so concurrent batches pace to the provider's TPM window instead of blowing it in one wave — keep it just under the provider cap). |
+| `AI_GUARD_WAIT_SECONDS`        | How long a deferred job waits for a freed guard slot before failing open (default 90; keep it under `WEB_RESEARCH_STEP_TIMEOUT`). |
 | `WEB_RESEARCH_MAX_CANDIDATES`   | Candidate results the agent considers before the AI filter (default 40, i.e. everything the provider returns). |
 | `WEB_RESEARCH_MAX_SOURCES`      | Kept sources the agent fetches and cites (default 40). |
 | `WEB_RESEARCH_FETCH_TIMEOUT`    | Per-page fetch timeout in seconds (default 8).        |

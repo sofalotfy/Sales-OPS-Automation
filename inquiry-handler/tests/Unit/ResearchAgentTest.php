@@ -473,6 +473,7 @@ class ResearchAgentTest extends TestCase
         // Small per-call budget with long pages forces layer 1: each page is its
         // own batch, and all batches are analysed in ONE concurrent round.
         config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_batch_input_chars', 1000);
         config()->set('web_research.note_attempts', 1);
 
         $urls = ['https://a.example', 'https://b.example', 'https://c.example'];
@@ -533,6 +534,7 @@ class ResearchAgentTest extends TestCase
     public function test_layer1_unparseable_batch_is_retried_then_recorded_as_failed(): void
     {
         config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_batch_input_chars', 1000);
         config()->set('web_research.note_attempts', 2);
 
         $url = 'https://a.example';
@@ -576,6 +578,7 @@ class ResearchAgentTest extends TestCase
     private function runNotesExtraction(string $facts): ResearchResult
     {
         config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_batch_input_chars', 1000);
         config()->set('web_research.note_attempts', 1);
 
         $url = 'https://example.com';
@@ -637,19 +640,28 @@ class ResearchAgentTest extends TestCase
         $this->assertStringContainsString('$48.2M', (string) $final['user']);
     }
 
-    public function test_notes_system_prompt_extracts_without_a_word_cap(): void
+    public function test_notes_system_prompt_states_the_output_limit_instead_of_a_word_cap(): void
     {
         $this->runNotesExtraction('Extracted facts about Example Corp.');
 
         $system = mb_strtolower((string) $this->aiCalls[1]['system']);
 
-        $this->assertStringNotContainsString('120 words', $system);
+        $this->assertStringNotContainsString('no word limit', $system);
+        $this->assertStringNotContainsString('no word cap', $system);
         $this->assertStringContainsString('extract', $system);
-        $this->assertStringContainsString('verbatim', $system);
+        $this->assertStringContainsString('output limit', $system);
+        // 512 cap sent, 435 stated: the headroom keeps the JSON envelope closed.
+        $this->assertStringContainsString('435 output tokens', $system);
+        $this->assertStringContainsString('truncated', $system);
     }
 
-    public function test_summary_system_prompt_extracts_instead_of_condensing(): void
+    public function test_summary_system_prompt_states_the_output_limit_instead_of_verbatim_demand(): void
     {
+        // Feature 011: asking for every detail VERBATIM under a hard output cap
+        // is what made the model truncate into invalid JSON ("Failed to generate
+        // JSON" -> "The research extraction was unavailable.").
+        config()->set('services.ai.max_output_tokens', 2048);
+
         $url = 'https://example.com';
         $agent = $this->makeAgent(
             [$this->filterOk([1]), $this->summaryOk('Extracted profile.')],
@@ -660,15 +672,21 @@ class ResearchAgentTest extends TestCase
 
         $system = mb_strtolower((string) $this->aiCalls[1]['system']);
 
-        $this->assertStringNotContainsString('concise', $system);
+        $this->assertStringNotContainsString('verbatim', $system);
+        $this->assertStringNotContainsString('do not condense', $system);
+        $this->assertStringNotContainsString('do not  truncate', $system);
         $this->assertStringContainsString('extract', $system);
-        $this->assertStringContainsString('verbatim', $system);
+        $this->assertStringContainsString('output limit', $system);
+        // 2048 cap sent, 1741 stated: the headroom keeps the JSON envelope closed.
+        $this->assertStringContainsString('1741 output tokens', $system);
+        $this->assertStringContainsString('truncated', $system);
     }
 
     public function test_layer2_extraction_passes_cover_every_note(): void
     {
         // The notes exceed the per-call cap, forcing layer 2 to run in passes.
         config()->set('web_research.summary_max_input_chars', 2000);
+        config()->set('web_research.note_batch_input_chars', 2000);
         config()->set('web_research.note_attempts', 1);
 
         $urls = ['https://a.example', 'https://b.example', 'https://c.example'];
@@ -747,6 +765,7 @@ class ResearchAgentTest extends TestCase
     public function test_layer2_partial_run_names_the_failed_batch_gap(): void
     {
         config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_batch_input_chars', 1000);
         config()->set('web_research.note_attempts', 1);
         $this->captureLogs();
 

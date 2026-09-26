@@ -25,6 +25,13 @@ class AiCallingService
     /** Bounded retries for fast transient provider failures (429/5xx). */
     private const MAX_RETRIES = 3;
 
+    /**
+     * Scheduling-round bound for completeMany(): each wave can wait at most
+     * one token window, so this only guards against a pathological spin — the
+     * real bound is `services.ai.guard_wait_seconds`.
+     */
+    private const MAX_SCHEDULING_ROUNDS = 300;
+
     public function __construct(
         private readonly PromptBuilder $promptBuilder,
         private readonly AiThroughputGuard $guard,
@@ -111,31 +118,79 @@ class AiCallingService
      *
      * @return array<mixed>|null
      */
-    public function complete(string $system, string $user, ?string $model = null): ?array
+    public function complete(string $system, string $user, ?string $model = null, bool $jsonMode = true): array|string|null
     {
-        // Feature 013 US2: respect the shared per-minute + in-flight budgets
-        // before spending a call. Over budget (null) → fail this call open,
-        // exactly as every other AI failure degrades.
-        $token = $this->guard->start();
+        $estimatedTokens = $this->estimatedTokens(['system' => $system, 'user' => $user]);
+        $token = $this->guard->start($estimatedTokens);
 
         if ($token === null) {
-            Log::warning('AI guard budget is full; the analysis call failed open (not sent).');
+            $token = $this->awaitGuardCapacity($estimatedTokens);
 
-            return null;
+            if ($token === null) {
+                Log::warning('AI guard budget is full; the analysis call failed open (not sent).', [
+                    'tokens_est' => $estimatedTokens,
+                    'token_cap' => config('services.ai.guard_max_tokens_per_min'),
+                ]);
+
+                return null;
+            }
         }
 
         try {
-            return $this->completeGuarded($system, $user, $model);
+            return $this->completeGuarded($system, $user, $model, $estimatedTokens, $token, $jsonMode);
         } finally {
             $this->guard->finish($token);
         }
     }
 
     /**
+     * Bounded wait for a shared slot while the guard reports the budgets full.
+     *
+     * Polls the non-mutating probe (so waiting does not churn the budgets it is
+     * waiting on) and reserves as soon as the call fits. Gives up when the
+     * wait budget elapses, and immediately when the call's own size exceeds
+     * the per-minute cap — that call could never fit, so waiting would only
+     * burn the budget it needs later.
+     */
+    private function awaitGuardCapacity(int $estimatedTokens): ?string
+    {
+        $waitCap = max(0, (float) config('services.ai.guard_wait_seconds', 90));
+        $tokenCap = max(1, (int) config('services.ai.guard_max_tokens_per_min', 7000));
+
+        if ($waitCap <= 0 || $estimatedTokens >= $tokenCap) {
+            return null;
+        }
+
+        $started = microtime(true);
+
+        while (microtime(true) - $started < $waitCap) {
+            usleep(1_000_000);
+
+            if (! $this->guard->hasCapacity($estimatedTokens)) {
+                continue;
+            }
+
+            $token = $this->guard->start($estimatedTokens);
+
+            if ($token !== null) {
+                return $token;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * @return array<mixed>|null
      */
-    private function completeGuarded(string $system, string $user, ?string $model = null): ?array
-    {
+    private function completeGuarded(
+        string $system,
+        string $user,
+        ?string $model = null,
+        int $estimatedTokens = 0,
+        ?string $reservation = null,
+        bool $jsonMode = true,
+    ): array|string|null {
         $key = (string) config('services.ai.key');
 
         if ($key === '') {
@@ -147,18 +202,17 @@ class AiCallingService
         $response = null;
         for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
             try {
-                $response = $this->call($job, $key, withJsonMode: true);
+                $response = $this->call($job, $key, withJsonMode: $jsonMode);
 
-                if ($this->needsPlainRetry($response)) {
+                if ($jsonMode && $this->needsPlainRetry($response)) {
                     $response = $this->call($job, $key, withJsonMode: false);
                 }
             } catch (ConnectionException $e) {
-                // A slammed/slow provider hangs rather than failing fast; do not
-                // multiply a long wait by retrying timeouts — fail open.
                 Log::warning('AI single completion aborted on a connection error (fail-open).', [
                     'model' => $model,
                     'error' => $e->getMessage(),
                 ]);
+                $this->guard->refund($estimatedTokens, $reservation);
 
                 return null;
             }
@@ -167,10 +221,6 @@ class AiCallingService
                 break;
             }
 
-            // Only transparent rate-limit/overload responses retry; these come
-            // back in milliseconds or seconds (TPM/RPM ceilings), so a short
-            // backoff costs almost nothing while riding through the free tier's
-            // transient 413 (token-per-minute) and 429 bursts.
             $isDailyQuota = $this->isDailyTokenQuotaExhausted($response);
 
             if ($isDailyQuota) {
@@ -178,27 +228,32 @@ class AiCallingService
             }
 
             if (in_array($response->status(), [413, 429, 500, 502, 503, 504], true)
-                && $attempt < self::MAX_RETRIES
-                && ! $isDailyQuota) {
-                usleep(min(30, $this->retryAfterSeconds($response) ?: $attempt * 2) * 1_000_000);
+                || ($jsonMode && $this->isJsonValidationFailure($response))) {
+                if ($attempt < self::MAX_RETRIES && ! $isDailyQuota) {
+                    usleep($this->retryWaitSeconds($response, $attempt) * 1_000_000);
 
-                continue;
+                    continue;
+                }
             }
 
             $this->logSingleCompletionFailure($response, $model);
+
+            if (! $this->isBillableResponse($response)) {
+                $this->guard->refund($estimatedTokens, $reservation);
+            }
 
             return null;
         }
 
         $content = $response?->json('choices.0.message.content');
 
-        if (! is_string($content)) {
+        if (! is_string($content) || (! $jsonMode && trim($content) === '')) {
             $this->logSingleCompletionFailure($response, $model);
 
             return null;
         }
 
-        return $this->extractJsonArray($content);
+        return $jsonMode ? $this->extractJsonArray($content) : trim($content);
     }
 
     /**
@@ -218,18 +273,25 @@ class AiCallingService
      * Run several AI completions concurrently, resolving each job independently.
      *
      * Each job is `['key' => string, 'system' => string, 'user' => string,
-     * 'model' => ?string]` (plus an optional `max_tokens` output cap). The whole
-     * set is fired together with the number of in-flight requests bounded by
-     * `services.ai.concurrency`. A 413 (token-per-minute)/429/5xx subset is
-     * re-fired with backoff (honouring Groq's `Retry-After` header) across up to
-     * `MAX_RETRIES` rounds; a 422 falls back to plain mode once. Any job that
-     * still fails resolves to `null` (fail-open, FR-007).
+     * 'model' => ?string]` (plus an optional `max_tokens` output cap). Jobs are
+     * fired in *waves*: before every wave each pending job reserves a shared
+     * slot (requests-per-minute, in-flight, and an estimated token-per-minute
+     * budget charged as input chars/4 + output cap), and only the jobs that fit
+     * the current window are sent, bounded by `services.ai.concurrency`. Jobs
+     * that do not fit keep their place and ride the next ~60s window, so a
+     * heavy fan-out paces itself to the provider's token budget instead of
+     * being rejected (or dumped) as one oversized burst. A 413/429/5xx subset
+     * is re-offered in a later wave (each job up to `MAX_RETRIES` attempts,
+     * honouring `Retry-After`, and coasting to the next window on TPM
+     * throttles); a 422 falls back to plain mode once. Jobs still unsent when
+     * `guard_wait_seconds` elapses, or that exhaust their attempts, resolve to
+     * `null` (fail-open, FR-007) and are logged.
      *
      * This is the parallel path for the research agent's layer-1 per-page notes:
      * independent batches no longer wait on each other.
      *
      * @param  array<int, array{key: string, system: string, user: string, model?: string|null, max_tokens?: int}>  $jobs
-     * @return array<string, array<mixed>|null>
+     * @return array<string, array<mixed>|string|null>
      */
     public function completeMany(array $jobs): array
     {
@@ -237,6 +299,7 @@ class AiCallingService
 
         $pending = [];
         $results = [];
+        $tokens = [];
 
         foreach ($jobs as $job) {
             $jobKey = (string) ($job['key'] ?? '');
@@ -247,113 +310,123 @@ class AiCallingService
 
             $pending[$jobKey] = $job;
             $results[$jobKey] = null;
+            $tokens[$jobKey] = $this->estimatedTokens($job);
         }
 
         if ($key === '' || $pending === []) {
             return $results;
         }
 
-        // Feature 013 US2: reserve a shared (RPM + in-flight) slot per job
-        // BEFORE the round fires, so an over-budget job fails open here
-        // instead of spending a burst the provider would reject. Uncounted
-        // calls (guard off/unavailable) still send without a token.
+        // Feature 013 US2 + token pacing: the shared budgets (RPM, in-flight,
+        // tokens-per-minute) gate each SEND WAVE, not just the initial scan.
+        // Every wave reserves job-by-job right before the pool fires: whatever
+        // fits the current token window goes out together and the rest keeps
+        // its place for the next window. Reserving the whole batch up front
+        // would let early bookings expire and then dump every job into one
+        // minute — the exact 413/429 pile-up the token budget exists to stop.
         $reservedTokens = [];
+        $refundable = [];
         $sent = [];
-        $blocked = [];
-
-        foreach ($pending as $jobKey => $job) {
-            $token = $this->guard->start();
-
-            if ($token === null) {
-                $blocked[$jobKey] = $job;
-
-                continue;
-            }
-
-            if ($token !== '') {
-                $reservedTokens[$jobKey] = $token;
-            }
-
-            $sent[$jobKey] = $job;
-        }
-
-        if ($blocked !== []) {
-            Log::info('AI guard budget is full; analysis jobs are deferred until a slot frees.', [
-                'jobs' => array_keys($blocked),
-                'rpm_cap' => config('services.ai.guard_max_per_min'),
-                'in_flight_cap' => config('services.ai.guard_max_inflight'),
-            ]);
-        }
-
-        // Keep fighting for a slot instead of silently dropping work: a batch
-        // that cannot reserve a slot would otherwise fail open and surface as
-        // a "batch failed" in research. The RPM window is 60s, so a bounded
-        // wait (default 90s) lets the run coast over the boundary rather than
-        // losing lanes. Only lanes still blocked past the cap fail open.
-        $waitStarted = microtime(true);
-        $waitCap = max(0, (float) config('services.ai.guard_wait_seconds', 90));
-
-        while ($blocked !== [] && microtime(true) - $waitStarted < $waitCap) {
-            usleep(1_000_000);
-
-            // Probe without spending the RPM budget we are waiting on: a
-            // per-second start() storm would keep the window pinned at the
-            // ceiling instead of draining naturally with time.
-            if (! $this->guard->hasCapacity()) {
-                continue;
-            }
-
-            foreach ($blocked as $jobKey => $job) {
-                $token = $this->guard->start();
-
-                if ($token === null) {
-                    continue;
-                }
-
-                unset($blocked[$jobKey]);
-                $pending[$jobKey] = $job;
-
-                if ($token !== '') {
-                    $reservedTokens[$jobKey] = $token;
-                }
-
-                $sent[$jobKey] = $job;
-            }
-        }
-
-        if ($blocked !== []) {
-            Log::warning('AI guard budget stayed exhausted; analysis jobs failed open (never sent).', [
-                'jobs' => array_keys($blocked),
-                'model' => $blocked[array_key_first($blocked)]['model'] ?? null,
-                'rpm_cap' => config('services.ai.guard_max_per_min'),
-                'in_flight_cap' => config('services.ai.guard_max_inflight'),
-            ]);
-
-            foreach ($blocked as $jobKey => $job) {
-                unset($pending[$jobKey]);
-            }
-        }
-
-        if ($pending === []) {
-            return $results;
-        }
-
-        $concurrency = max(1, (int) config('services.ai.concurrency', 4));
-        $timeout = (int) config('services.ai.timeout', 90);
+        $attempts = [];
         $lastResponse = [];
         $dailyQuota = false;
 
-        for ($attempt = 1; $pending !== [] && $attempt <= self::MAX_RETRIES; $attempt++) {
+        $concurrency = max(1, (int) config('services.ai.concurrency', 4));
+        $timeout = (int) config('services.ai.timeout', 90);
+        $waitCap = max(0, (float) config('services.ai.guard_wait_seconds', 90));
+        $schedulingStarted = microtime(true);
+
+        for ($round = 1; $pending !== [] && $round <= self::MAX_SCHEDULING_ROUNDS; $round++) {
+            if ($round > 1 && microtime(true) - $schedulingStarted >= $waitCap) {
+                break;
+            }
+
+            $fire = [];
+            $deferred = [];
+
+            foreach ($pending as $jobKey => $job) {
+                // A job that already burned its attempts is not re-offered.
+                if (($attempts[$jobKey] ?? 0) >= self::MAX_RETRIES) {
+                    continue;
+                }
+
+                $token = $this->guard->start($tokens[$jobKey] ?? 0);
+
+                if ($token === null) {
+                    $deferred[$jobKey] = $job;
+
+                    continue;
+                }
+
+                if ($token !== '') {
+                    $reservedTokens[$jobKey] = $token;
+
+                    // Kept past `releaseReservation` so the final refund can
+                    // name the token bucket this job was charged to.
+                    $refundable[$jobKey] = $token;
+                }
+
+                $fire[$jobKey] = $job;
+                $sent[$jobKey] = $job;
+            }
+
+            if ($deferred !== [] && $round === 1) {
+                Log::info('AI guard budget is full; analysis jobs are deferred to the next window.', [
+                    'jobs' => array_keys($deferred),
+                    'rpm_cap' => config('services.ai.guard_max_per_min'),
+                    'in_flight_cap' => config('services.ai.guard_max_inflight'),
+                    'token_cap' => config('services.ai.guard_max_tokens_per_min'),
+                ]);
+            }
+
+            if ($fire === []) {
+                if ($deferred === []) {
+                    break;
+                }
+
+                $remaining = $waitCap - (microtime(true) - $schedulingStarted);
+
+                if ($remaining <= 0) {
+                    break;
+                }
+
+                // Nothing fits the shared budgets right now. Poll cheaply when
+                // the request budgets are fine (a slot frees in seconds),
+                // otherwise coast to the next token window — never past the
+                // remaining wait budget.
+                $waitSeconds = $this->guard->hasCapacity()
+                    ? 1
+                    : min($this->secondsUntilNextWindow(), max(1, (int) ceil($remaining)));
+
+                usleep($waitSeconds * 1_000_000);
+
+                continue;
+            }
+
             try {
                 $responses = Http::pool(
-                    function (Pool $pool) use ($pending, $key, $timeout) {
-                        foreach ($pending as $jobKey => $job) {
+                    function (Pool $pool) use ($fire, $key, $timeout, $tokens) {
+                        foreach ($fire as $jobKey => $job) {
+                            Log::info('AI request (pool batch)', [
+                                'job' => $jobKey,
+                                'model' => isset($job['model']) && is_string($job['model']) && $job['model'] !== ''
+                                    ? $job['model']
+                                    : (string) config('services.ai.model', 'openai/gpt-oss-20b'),
+                                'json_mode' => ! ($job['text'] ?? false),
+                                'max_tokens' => is_int($job['max_tokens'] ?? null) && $job['max_tokens'] > 0
+                                    ? $job['max_tokens']
+                                    : max(1, (int) config('services.ai.max_output_tokens', 4096)),
+                                'tokens_est' => $tokens[$jobKey] ?? 0,
+                                'user_chars' => mb_strlen((string) $job['user']),
+                                'user_preview' => mb_substr((string) $job['user'], 0, 250),
+                            ]);
+
                             $pool->as($jobKey)
                                 ->withToken($key)
                                 ->acceptJson()
                                 ->asJson()
                                 ->timeout($timeout)
-                                ->post((string) config('services.ai.url'), $this->payload($job, true));
+                                ->post((string) config('services.ai.url'), $this->payload($job, ! ($job['text'] ?? false)));
                         }
                     },
                     $concurrency,
@@ -368,18 +441,29 @@ class AiCallingService
 
             $retry = [];
             $retryAfter = 0;
+            $tpmThrottled = false;
 
             foreach ($responses as $jobKey => $response) {
                 // Pool response keys mirror the `as($key)` names; numeric-string
                 // keys arrive as PHP ints, so normalise before matching against
-                // `$pending` (also keyed by string-indexed array → ints).
+                // `$fire` (also keyed by string-indexed array → ints).
                 $jobKey = (string) $jobKey;
 
-                if (! isset($pending[$jobKey])) {
+                if (! isset($fire[$jobKey])) {
                     continue;
                 }
 
-                $job = $pending[$jobKey];
+                $attempts[$jobKey] = ($attempts[$jobKey] ?? 0) + 1;
+
+                $job = $fire[$jobKey];
+
+                if ($response instanceof Response) {
+                    Log::info('AI response (pool batch)', [
+                        'job' => $jobKey,
+                        'status' => $response->status(),
+                        'body' => mb_substr((string) $response->body(), 0, 250),
+                    ]);
+                }
 
                 $lastResponse[$jobKey] = $response instanceof Response
                     ? [
@@ -397,11 +481,21 @@ class AiCallingService
                 }
 
                 if ($response instanceof Response
-                    && in_array($response->status(), [413, 429, 500, 502, 503, 504], true)
-                    && $attempt < self::MAX_RETRIES
+                    && (in_array($response->status(), [413, 429, 500, 502, 503, 504], true)
+                        || (! ($job['text'] ?? false) && $this->isJsonValidationFailure($response)))
+                    && ($attempts[$jobKey] ?? 0) < self::MAX_RETRIES
                     && ! $isDailyQuota) {
                     $retry[$jobKey] = $job;
                     $retryAfter = max($retryAfter, $this->retryAfterSeconds($response));
+
+                    if ($this->isTokenPerMinuteThrottle($response)) {
+                        $tpmThrottled = true;
+                    }
+
+                    // The wave is over for this job: give the in-flight slot
+                    // back now so a re-fire (next window) can reserve one
+                    // again, instead of parking a slot while it waits.
+                    $this->releaseReservation($reservedTokens, $jobKey);
 
                     continue;
                 }
@@ -411,14 +505,42 @@ class AiCallingService
                 $this->releaseReservation($reservedTokens, $jobKey);
             }
 
-            if ($retry === []) {
+            // Deferred jobs keep their place; retried jobs re-enter the race
+            // for the next window.
+            $pending = $retry + $deferred;
+
+            if ($pending === []) {
                 break;
             }
 
-            // Token-per-minute ceilings free up on a ~60s window; wait at least
-            // a couple of seconds (or the provider's Retry-After when present).
-            usleep(max(2, min(30, $retryAfter > 0 ? $retryAfter : $attempt * 2)) * 1_000_000);
-            $pending = $retry;
+            // Token-per-minute ceilings only reset on the ~60s window — sleeping
+            // the provider's Retry-After and re-firing into the same saturated
+            // minute just re-exhausts it. An explicit TPM throttle coasts to
+            // the window; otherwise poll briefly (a token window frees sooner
+            // than a full minute once the bookings drain).
+            $waitSeconds = $tpmThrottled || ! $this->guard->hasCapacity()
+                ? $this->secondsUntilNextWindow()
+                : max(2, min(30, $retryAfter > 0 ? $retryAfter : 2));
+
+            $remaining = $waitCap - (microtime(true) - $schedulingStarted);
+
+            if ($remaining <= 0) {
+                break;
+            }
+
+            usleep(min($waitSeconds, max(1, (int) ceil($remaining))) * 1_000_000);
+        }
+
+        $neverSent = array_values(array_diff(array_keys($pending), array_keys($sent)));
+
+        if ($neverSent !== []) {
+            Log::warning('AI guard budget stayed exhausted; analysis jobs failed open (never sent).', [
+                'jobs' => $neverSent,
+                'model' => $pending[$neverSent[0]]['model'] ?? null,
+                'rpm_cap' => config('services.ai.guard_max_per_min'),
+                'in_flight_cap' => config('services.ai.guard_max_inflight'),
+                'token_cap' => config('services.ai.guard_max_tokens_per_min'),
+            ]);
         }
 
         // Jobs still holding reservations when the rounds end (e.g. the pool
@@ -441,8 +563,25 @@ class AiCallingService
         $unresolved = [];
 
         foreach ($sent as $jobKey => $job) {
-            if (($results[$jobKey] ?? null) === null) {
-                $unresolved[$jobKey] = $job;
+            if (($results[$jobKey] ?? null) !== null) {
+                continue;
+            }
+
+            $unresolved[$jobKey] = $job;
+
+            // Return the token booking unless the final attempt actually
+            // consumed model tokens (2xx billed the completion; a 400
+            // json_validate_failed still billed its input). A job that only
+            // ever saw 429/413/5xx/socket failures refills the minute window.
+            $final = $lastResponse[$jobKey] ?? null;
+            $finalBilled = is_array($final)
+                && ($final['status'] === 200
+                    || ($final['status'] === 400
+                        && is_string($final['body'] ?? null)
+                        && str_contains($final['body'], 'json_validate_failed')));
+
+            if (! $finalBilled) {
+                $this->guard->refund($tokens[$jobKey] ?? 0, $refundable[$jobKey] ?? null);
             }
         }
 
@@ -484,13 +623,15 @@ class AiCallingService
      * @param  array<string, mixed>  $job
      * @return array<mixed>|null
      */
-    private function resolveResponse(array $job, mixed $response): ?array
+    private function resolveResponse(array $job, mixed $response): array|string|null
     {
         if (! $response instanceof Response) {
             return null;
         }
 
-        if ($this->needsPlainRetry($response)) {
+        $textMode = (bool) ($job['text'] ?? false);
+
+        if (! $textMode && $this->needsPlainRetry($response)) {
             try {
                 $response = $this->call($job, (string) config('services.ai.key'), withJsonMode: false);
             } catch (ConnectionException) {
@@ -501,8 +642,8 @@ class AiCallingService
         if ($response->successful()) {
             $content = $response->json('choices.0.message.content');
 
-            if (is_string($content)) {
-                return $this->extractJsonArray($content);
+            if (is_string($content) && ($textMode ? trim($content) !== '' : true)) {
+                return $textMode ? trim($content) : $this->extractJsonArray($content);
             }
         }
 
@@ -530,6 +671,19 @@ class AiCallingService
     }
 
     /**
+     * Whether a 400 is Groq's JSON-mode validation rejection. These arrive with
+     * an empty `failed_generation` when the model produced no content at all on
+     * that request (intermittent on the free tier), so a bounded re-fire next
+     * round usually rides through it — the round loop treats it like a transient
+     * overload instead of failing the stage open.
+     */
+    private function isJsonValidationFailure(Response $response): bool
+    {
+        return $response->status() === 400
+            && str_contains($response->body(), 'json_validate_failed');
+    }
+
+    /**
      * Seconds to pause for a rate-limited response, 0 when absent or unusable.
      */
     private function retryAfterSeconds(Response $response): int
@@ -541,6 +695,80 @@ class AiCallingService
         }
 
         return min((int) $value, 30);
+    }
+
+    /**
+     * Backoff for one retry round. A token-per-minute throttle (413 or a 429
+     * that mentions TPM) is not eased by sleeping Retry-After — the budget
+     * only resets on the ~60s window — so wait until the window rolls over
+     * instead of re-firing the whole batch into the same saturated minute.
+     */
+    private function retryWaitSeconds(Response $response, int $attempt): int
+    {
+        if ($this->isTokenPerMinuteThrottle($response)) {
+            return $this->secondsUntilNextWindow();
+        }
+
+        return max(2, min(30, $this->retryAfterSeconds($response) ?: $attempt * 2));
+    }
+
+    /**
+     * Whether a 413/429 response is the token-per-minute ceiling (as opposed
+     * to a request-per-minute ceiling, a daily quota, or a too-large-prompt
+     * 413). Only a body that explicitly names TPM rotates on the 60s window,
+     * so only it deserves the window-aligned backoff; a bare 413 (prompt too
+     * long) or a plain 429 rides the short Retry-After backoff.
+     */
+    private function isTokenPerMinuteThrottle(Response $response): bool
+    {
+        if (! in_array($response->status(), [413, 429], true)) {
+            return false;
+        }
+
+        return preg_match('/tokens per minute|\(tpm\)|token-per-minute/i', (string) $response->body()) === 1;
+    }
+
+    /**
+     * Whole seconds until the next 60s budget window opens (the TPM/RPM keys
+     * rotate on `YmdHi`). Bounded so a rounding error never yields a no-op.
+     */
+    private function secondsUntilNextWindow(): int
+    {
+        return max(2, 61 - (int) now()->second);
+    }
+
+    /**
+     * Whether a failure response still consumed provider tokens, so the guard
+     * booking must be kept rather than refunded. A 2xx billed the completion;
+     * a 400 json_validate_failed sent its input to the model before rejecting
+     * the output.
+     */
+    private function isBillableResponse(?Response $response): bool
+    {
+        if (! $response instanceof Response) {
+            return false;
+        }
+
+        return $response->status() === 200 || $this->isJsonValidationFailure($response);
+    }
+
+    /**
+     * Guard token estimate for one job: rough input tokens (chars ÷ 4, system
+     * + user, matching the 4 chars/token approximation providers use) plus the
+     * output cap actually sent in the payload.
+     *
+     * @param  array<string, mixed>  $job
+     */
+    private function estimatedTokens(array $job): int
+    {
+        $inputChars = mb_strlen((string) ($job['system'] ?? ''))
+            + mb_strlen((string) ($job['user'] ?? ''));
+
+        $maxOutput = is_int($job['max_tokens'] ?? null) && $job['max_tokens'] > 0
+            ? $job['max_tokens']
+            : max(1, (int) config('services.ai.max_output_tokens', 2048));
+
+        return max(1, (int) (($inputChars / 4) + $maxOutput));
     }
 
     /**
@@ -624,12 +852,35 @@ class AiCallingService
      */
     private function call(array $job, string $key, bool $withJsonMode): Response
     {
-        return Http::baseUrl('')
+        Log::info('AI request (single)', [
+            'model' => isset($job['model']) && is_string($job['model']) && $job['model'] !== ''
+                ? $job['model']
+                : (string) config('services.ai.model', 'openai/gpt-oss-20b'),
+            'json_mode' => $withJsonMode,
+            'max_tokens' => is_int($job['max_tokens'] ?? null) && $job['max_tokens'] > 0
+                ? $job['max_tokens']
+                : max(1, (int) config('services.ai.max_output_tokens', 4096)),
+            'tokens_est' => $this->estimatedTokens($job),
+            'user_chars' => mb_strlen((string) $job['user']),
+            'user_preview' => mb_substr((string) $job['user'], 0, 250),
+        ]);
+
+        $response = Http::baseUrl('')
             ->withToken($key)
             ->acceptJson()
             ->asJson()
             ->timeout((int) config('services.ai.timeout', 90))
             ->post((string) config('services.ai.url'), $this->payload($job, $withJsonMode));
+
+        Log::info('AI response (single)', [
+            'model' => isset($job['model']) && is_string($job['model']) && $job['model'] !== ''
+                ? $job['model']
+                : (string) config('services.ai.model', 'openai/gpt-oss-20b'),
+            'status' => $response->status(),
+            'body' => mb_substr((string) $response->body(), 0, 250),
+        ]);
+
+        return $response;
     }
 
     /**

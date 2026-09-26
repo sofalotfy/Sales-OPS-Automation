@@ -68,11 +68,21 @@ return [
     'note_attempts' => (int) env('WEB_RESEARCH_NOTE_ATTEMPTS', 2),
 
     // Layer-1 notes output cap (tokens). Notes EXTRACT the pages' detail, so the
-    // output budget is generous; it also bounds the per-note text kept by the
-    // agent (≈4 chars/token, well above the old 800-char note truncation).
-    // It keeps input + output of every call inside the 8K TPM window even when
-    // several batches fire in the same minute.
-    'note_max_output_tokens' => (int) env('WEB_RESEARCH_NOTE_MAX_OUTPUT_TOKENS', 1024),
+    // output budget must stay well clear of the old 800-char note truncation
+    // (≈4 chars/token), but every token here is paid for twice: once by the
+    // notes call and again when the final extraction reads the notes back.
+    // 512 keeps a full page's decisive facts and roughly halves a run's token
+    // spend, which is what the daily quota actually binds on.
+    'note_max_output_tokens' => (int) env('WEB_RESEARCH_NOTE_MAX_OUTPUT_TOKENS', 512),
+
+    // Characters of page text per layer-1 notes call. Separate from
+    // `summary_max_input_chars` on purpose: notes want FEWER, LARGER batches
+    // (each one re-sends the system prompt and burns a per-minute wave, and the
+    // text is paid for either way), while the final extraction wants SMALL
+    // chunks (one call has to answer with a single bounded JSON summary).
+    // ~2.7k tokens of input + 512 out keeps two concurrent calls inside the
+    // 7K token budget the guard allows.
+    'note_batch_input_chars' => (int) env('WEB_RESEARCH_NOTE_BATCH_INPUT_CHARS', 11000),
 
     // Best-effort rescue: when the AI filter can settle nothing (not_found /
     // ambiguous / empty keep) but candidates still carry the target's name,
