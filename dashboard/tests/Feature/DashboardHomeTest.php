@@ -24,7 +24,9 @@ class DashboardHomeTest extends TestCase
                 byStatus: ['succeeded' => 136, 'failed' => 2, 'researching' => 1],
                 byClassification: ['low' => 62, 'disqualify' => 56, 'medium' => 14, 'high' => 7],
                 refusals: 4,
-                avgScore: 41.2,
+                scored: 36,
+                noSignal: 103,
+                avgScoredScore: 55.77,
             ),
             [
                 UpstreamStubs::classificationResult(id: 9, classification: 'high', score: 88),
@@ -43,8 +45,13 @@ class DashboardHomeTest extends TestCase
             // Only the in-flight card carries the sky-600 value styling, so this
             // pins `researching: 1` to that card rather than any other number.
             ->assertSee('<p class="mt-1 text-2xl font-semibold text-sky-600">1</p>', false)
-            ->assertSee('Average score')
-            ->assertSee('41.20')
+            ->assertSee('Usable signal')
+            ->assertSee('Avg score (scored runs)')
+            ->assertSee('55.77')
+            // The zero-signal count has to reach the page, otherwise the
+            // headline score silently hides the runs it excludes.
+            ->assertSee('103 scored 0')
+            ->assertSee('Excludes 103 zero-signal runs')
             ->assertSee('Refusals')
             ->assertSee('Classification mix')
             ->assertSee('Recent runs');

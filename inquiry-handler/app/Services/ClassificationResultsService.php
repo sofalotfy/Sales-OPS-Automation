@@ -55,12 +55,22 @@ class ClassificationResultsService
      * interfere with grouping, and `final_score` is averaged as a raw column
      * for the same reason.
      *
+     * `avg_scored_score` deliberately averages only the runs that produced a
+     * usable score. A `final_score` of 0 is an honest "no signal" (the factor
+     * found nothing, or the catalog was empty), not a bad lead, so blending
+     * those rows into one mean reports research coverage as lead quality. On
+     * the current log that drags 55.77 down to 14.44. Consumers that want the
+     * blended figure can still compute it from `scored`/`no_signal` if they
+     * truly want it.
+     *
      * @return array{
      *     total: int,
      *     by_status: array<string, int>,
      *     by_classification: array<string, int>,
      *     refusals: int,
-     *     avg_score: float|null
+     *     scored: int,
+     *     no_signal: int,
+     *     avg_scored_score: float|null
      * }
      *
      * @throws Throwable when the scoped store is unreadable
@@ -86,10 +96,15 @@ class ClassificationResultsService
             $byClassification[(string) $row->classification] = (int) $row->total;
         }
 
+        // A NULL score is a run that has not been scored yet (still in flight),
+        // which is a third state distinct from "scored zero", so it is counted
+        // only via `total` and never folded into either bucket below.
+        $scored = (clone $base)->where('final_score', '>', 0)->count();
+
         // Postgres returns avg() as a bare numeric and JSON cannot distinguish a
         // whole float from an int, so the average is rounded to a fixed 2dp for
         // a stable, display-ready number.
-        $avgScore = (clone $base)->avg('final_score');
+        $avgScoredScore = (clone $base)->where('final_score', '>', 0)->avg('final_score');
 
         return [
             'total' => (int) (clone $base)->count(),
@@ -99,7 +114,9 @@ class ClassificationResultsService
                 ->whereNotNull('refusal')
                 ->where('refusal', '<>', '')
                 ->count(),
-            'avg_score' => $avgScore === null ? null : round((float) $avgScore, 2),
+            'scored' => (int) $scored,
+            'no_signal' => (int) (clone $base)->where('final_score', 0)->count(),
+            'avg_scored_score' => $avgScoredScore === null ? null : round((float) $avgScoredScore, 2),
         ];
     }
 

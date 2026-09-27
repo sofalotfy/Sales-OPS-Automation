@@ -470,14 +470,18 @@ class UpstreamStubs
         array $byStatus = ['succeeded' => 139],
         array $byClassification = ['low' => 62, 'disqualify' => 56, 'medium' => 14, 'high' => 7],
         int $refusals = 0,
-        ?float $avgScore = 41.2,
+        int $scored = 36,
+        int $noSignal = 103,
+        ?float $avgScoredScore = 55.77,
     ): array {
         return [
             'total' => $total,
             'by_status' => $byStatus,
             'by_classification' => $byClassification,
             'refusals' => $refusals,
-            'avg_score' => $avgScore,
+            'scored' => $scored,
+            'no_signal' => $noSignal,
+            'avg_scored_score' => $avgScoredScore,
         ];
     }
 

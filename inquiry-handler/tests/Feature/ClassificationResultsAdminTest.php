@@ -232,7 +232,9 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('by_status.succeeded', 3)
             ->assertJsonPath('by_classification.medium', 3)
             ->assertJsonPath('refusals', 0)
-            ->assertJsonPath('avg_score', 72);
+            ->assertJsonPath('scored', 3)
+            ->assertJsonPath('no_signal', 0)
+            ->assertJsonPath('avg_scored_score', 72);
     }
 
     public function test_stats_groups_rows_with_no_status_under_unknown(): void
@@ -272,7 +274,11 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('by_classification.medium', 1)
             ->assertJsonPath('by_classification.disqualify', 1)
             ->assertJsonPath('refusals', 1)
-            ->assertJsonPath('avg_score', 41);
+            // The queued row has a NULL score (not yet scored), so it counts
+            // toward neither bucket; (72 + 10) / 2 = 41.
+            ->assertJsonPath('scored', 2)
+            ->assertJsonPath('no_signal', 0)
+            ->assertJsonPath('avg_scored_score', 41);
     }
 
     public function test_stats_omits_rows_that_have_no_classification_yet(): void
@@ -302,7 +308,40 @@ class ClassificationResultsAdminTest extends TestCase
         $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
             ->assertOk()
             // (72 + 10 + 33) / 3 = 38.3333…
-            ->assertJsonPath('avg_score', 38.33);
+            ->assertJsonPath('avg_scored_score', 38.33);
+    }
+
+    public function test_stats_keeps_zero_scores_out_of_the_average(): void
+    {
+        Stubs::authVerifyOk();
+        foreach ([72.0, 10.0, 0.0, 0.0] as $score) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'final_score' => $score]);
+        }
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 4)
+            // A score of 0 is an honest "no signal", not a bad lead, so it is
+            // counted separately and excluded from the mean: (72 + 10) / 2 = 41.
+            ->assertJsonPath('scored', 2)
+            ->assertJsonPath('no_signal', 2)
+            ->assertJsonPath('avg_scored_score', 41);
+    }
+
+    public function test_stats_reports_no_average_when_every_run_scored_zero(): void
+    {
+        Stubs::authVerifyOk();
+        foreach (range(1, 3) as $ignored) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'final_score' => 0.0]);
+        }
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('scored', 0)
+            ->assertJsonPath('no_signal', 3)
+            ->assertJsonPath('avg_scored_score', null);
     }
 
     public function test_stats_on_empty_log_returns_zeroes(): void
@@ -315,7 +354,9 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('by_status', [])
             ->assertJsonPath('by_classification', [])
             ->assertJsonPath('refusals', 0)
-            ->assertJsonPath('avg_score', null);
+            ->assertJsonPath('scored', 0)
+            ->assertJsonPath('no_signal', 0)
+            ->assertJsonPath('avg_scored_score', null);
     }
 
     public function test_stats_requires_upstream_token(): void

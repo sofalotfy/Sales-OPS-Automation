@@ -14,7 +14,13 @@
             $inFlightCount += (int) ($byStatus[$inFlightStatus] ?? 0);
         }
         $refusalCount = (int) ($stats['refusals'] ?? 0);
-        $avgScore = $stats['avg_score'] ?? null;
+        // A final_score of 0 means the factor found no signal, not that the lead
+        // is bad, so runs are reported as scored / no-signal rather than folded
+        // into a single average that reads like lead quality.
+        $scoredCount = (int) ($stats['scored'] ?? 0);
+        $noSignalCount = (int) ($stats['no_signal'] ?? 0);
+        $avgScoredScore = $stats['avg_scored_score'] ?? null;
+        $scoredShare = ($total ?? 0) > 0 ? (int) round($scoredCount / $total * 100) : 0;
         $failedOnPage = array_values(array_filter(
             $results,
             fn (array $result): bool => ($result['status'] ?? null) === 'failed',
@@ -58,10 +64,27 @@
             </div>
         </div>
 
-        <div class="mt-4 grid gap-4 sm:grid-cols-3">
+        <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p class="text-sm text-slate-500">Average score</p>
-                <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $avgScore === null ? '—' : number_format((float) $avgScore, 2) }}</p>
+                <p class="text-sm text-slate-500">Usable signal</p>
+                <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $scoredCount }}</p>
+                <p class="mt-1 text-xs text-slate-500">
+                    {{ $scoredShare }}% of {{ $total ?? 0 }} runs
+                    @if ($noSignalCount > 0)
+                        &middot; {{ $noSignalCount }} scored 0
+                    @endif
+                </p>
+            </div>
+            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p class="text-sm text-slate-500">Avg score (scored runs)</p>
+                <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $avgScoredScore === null ? '—' : number_format((float) $avgScoredScore, 2) }}</p>
+                <p class="mt-1 text-xs text-slate-500">
+                    @if ($noSignalCount > 0)
+                        Excludes {{ $noSignalCount }} zero-signal {{ \Illuminate\Support\Str::plural('run', $noSignalCount) }}
+                    @else
+                        Across every scored run
+                    @endif
+                </p>
             </div>
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p class="text-sm text-slate-500">Refusals</p>
