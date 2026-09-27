@@ -46,15 +46,18 @@ class InquiryHandlerApiClient
     /**
      * One page of the classification log.
      *
-     * `status` and `classification` are optional exact-match filters; a null
-     * value is omitted from the query string entirely so the upstream treats it
-     * as unfiltered rather than as an empty match.
+     * `status` and `classification` are optional exact-match filters; `from` and
+     * `to` are inclusive `Y-m-d` calendar-day bounds. A null value is omitted
+     * from the query string entirely so the upstream treats it as unfiltered
+     * rather than as an empty match.
      */
     public function getClassificationResults(
         int $limit = 20,
         int $offset = 0,
         ?string $status = null,
         ?string $classification = null,
+        ?string $from = null,
+        ?string $to = null,
     ): Response {
         $query = ['limit' => $limit, 'offset' => $offset];
 
@@ -64,6 +67,14 @@ class InquiryHandlerApiClient
 
         if ($classification !== null && $classification !== '') {
             $query['classification'] = $classification;
+        }
+
+        if ($from !== null && $from !== '') {
+            $query['from'] = $from;
+        }
+
+        if ($to !== null && $to !== '') {
+            $query['to'] = $to;
         }
 
         return $this->authenticatedRequest()
@@ -77,15 +88,30 @@ class InquiryHandlerApiClient
     }
 
     /**
-     * Whole-log aggregates for the landing page (contracts/classification-reporting.md).
+     * Aggregates for the landing page (contracts/classification-reporting.md).
      *
      * Distinct from getClassificationResults(): that describes a single page and
      * caps at 50 rows, so status/classification counts taken from it would
      * silently under-report once the log outgrows a page.
+     *
+     * `from` and `to` scope the aggregates to the same inclusive calendar days
+     * the list filter uses. The window is applied to the single query every
+     * count is derived from, so the cards, the mix, and `total` all describe
+     * the same period instead of a filtered list beside whole-log numbers.
      */
-    public function getClassificationStats(): Response
+    public function getClassificationStats(?string $from = null, ?string $to = null): Response
     {
-        return $this->authenticatedRequest()->get('/admin/classification-results/stats');
+        $query = [];
+
+        if ($from !== null && $from !== '') {
+            $query['from'] = $from;
+        }
+
+        if ($to !== null && $to !== '') {
+            $query['to'] = $to;
+        }
+
+        return $this->authenticatedRequest()->get('/admin/classification-results/stats', $query);
     }
 
     /** Every catalog sector (GET /admin/sectors, contracts/sectors-admin.md). */

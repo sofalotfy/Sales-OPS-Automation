@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Enums\InquiryRunStatus;
 use App\Models\ClassificationResult;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Throwable;
 
 /**
@@ -40,6 +42,8 @@ class ClassificationResultsService
         int $offset,
         ?string $status = null,
         ?string $classification = null,
+        ?string $from = null,
+        ?string $to = null,
     ): array {
         $status = ($status === null || $status === '') ? null : $status;
         $classification = ($classification === null || $classification === '') ? null : $classification;
@@ -54,7 +58,7 @@ class ClassificationResultsService
             $classification = null;
         }
 
-        $query = ClassificationResult::query();
+        $query = $this->withinRange(ClassificationResult::query(), $from, $to);
 
         if ($status !== null) {
             $query->where('status', $status);
@@ -111,9 +115,42 @@ class ClassificationResultsService
      *
      * @throws Throwable when the scoped store is unreadable
      */
-    public function stats(): array
+    /**
+     * Restricts a query to runs created inside the given calendar days, inclusive.
+     *
+     * The upper bound is half-open (`< to + 1 day`) rather than `<= to 23:59:59`
+     * so a run stamped at the very last microsecond of the end day is still
+     * inside the range, instead of falling outside a `23:59:59` ceiling on a
+     * microsecond-precision column.
+     *
+     * The bounds are UTC because that is the app timezone and the column is
+     * stored in it, so "the 27th" means the same thing to the handler and to
+     * the dashboard rendering the picker.
+     *
+     * @param  Builder<ClassificationResult>  $query
+     */
+    private function withinRange(Builder $query, ?string $from, ?string $to): Builder
     {
-        $base = ClassificationResult::query()->toBase();
+        if ($from !== null) {
+            $query->where('created_at', '>=', $from.' 00:00:00');
+        }
+
+        if ($to !== null) {
+            $end = CarbonImmutable::parse($to, 'UTC')->addDay()->startOfDay();
+
+            $query->where('created_at', '<', $end->toDateTimeString());
+        }
+
+        return $query;
+    }
+
+    public function stats(?string $from = null, ?string $to = null): array
+    {
+        // The range is applied before `toBase()` so the aggregates below inherit
+        // it. Every count in the payload comes from `$base`, so scoping that one
+        // query is what keeps the cards, the mix, and the total describing the
+        // same window instead of the whole log beside a filtered list.
+        $base = $this->withinRange(ClassificationResult::query(), $from, $to)->toBase();
 
         $byStatus = [];
         foreach ((clone $base)->selectRaw('status, count(*) as total')->groupBy('status')->get() as $row) {

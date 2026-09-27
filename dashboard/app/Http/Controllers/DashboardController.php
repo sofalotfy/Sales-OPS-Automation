@@ -4,11 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Services\InquiryHandlerApiClient;
 use App\Services\RagApiClient;
+use App\Support\CalendarRange;
 use App\Support\UpstreamSession;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response as ClientResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\View\View;
 
@@ -31,16 +33,45 @@ class DashboardController extends Controller
      * failure in one does not blank the page. The RAG corpus has its own tab;
      * it is deliberately absent here even though the pipeline retrieves from it.
      */
-    public function home(): View|RedirectResponse
+    public function home(Request $request): View|RedirectResponse
     {
         $handler = app(InquiryHandlerApiClient::class);
+        $range = CalendarRange::fromRequest($request);
 
-        $statsResponse = $this->call(fn (): ClientResponse => $handler->getClassificationStats());
+        // A start after the end is a request with no answer rather than a typo,
+        // so it is reported in the filter instead of being sent upstream to come
+        // back 422 and blank the cards.
+        if ($range->isReversed()) {
+            return view('dashboard.home', [
+                'stats' => null,
+                'statsError' => 'The start date must not be after the end date.',
+                'results' => [],
+                'resultsError' => null,
+                'total' => null,
+                'range' => $range,
+            ]);
+        }
+
+        // Both calls take the same window. The cards are aggregates and the list
+        // is rows, so scoping only one would leave the page claiming a period
+        // its own run list does not belong to.
+        $statsResponse = $this->call(
+            fn (): ClientResponse => $handler->getClassificationStats($range->from, $range->to),
+        );
         if ($statsResponse?->status() === 401) {
             return redirect()->route('login.show');
         }
 
-        $resultsResponse = $this->call(fn (): ClientResponse => $handler->getClassificationResults(self::RECENT_RUN_LIMIT));
+        $resultsResponse = $this->call(
+            fn (): ClientResponse => $handler->getClassificationResults(
+                self::RECENT_RUN_LIMIT,
+                0,
+                null,
+                null,
+                $range->from,
+                $range->to,
+            ),
+        );
         if ($resultsResponse?->status() === 401) {
             return redirect()->route('login.show');
         }
@@ -55,6 +86,7 @@ class DashboardController extends Controller
                 ? ($resultsResponse?->json('detail') ?? 'The inquiry handler is unavailable. Please try again.')
                 : null,
             'total' => $statsResponse?->successful() ? (int) $statsResponse->json('total', 0) : null,
+            'range' => $range,
         ]);
     }
 

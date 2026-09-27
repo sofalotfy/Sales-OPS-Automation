@@ -62,6 +62,21 @@ class ClassificationResultsAdminTest extends TestCase
         ]);
     }
 
+    /**
+     * Seeds a run stamped at a given UTC moment, which is what a range filters on.
+     *
+     * `created_at` is not fillable and is stamped by the model, so it is written
+     * through the query builder rather than mass-assigned.
+     */
+    private function runAt(string $createdAt): ClassificationResult
+    {
+        $run = $this->seedRun();
+        $run->update(['status' => 'queued', 'classification' => null, 'final_score' => null]);
+        $run->toBase()->where('id', $run->id)->update(['created_at' => $createdAt]);
+
+        return $run->refresh();
+    }
+
     public function test_missing_token_returns_401(): void
     {
         $this->getJson('/admin/classification-results')
@@ -669,5 +684,165 @@ class ClassificationResultsAdminTest extends TestCase
         $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
             ->assertStatus(503)
             ->assertJsonPath('detail', 'Classification log unavailable.');
+    }
+
+    public function test_index_filters_by_an_inclusive_date_range(): void
+    {
+        Stubs::authVerifyOk();
+
+        // 14:00 and 22:00 on the 20th, plus one just outside either bound.
+        $morning = $this->runAt('2026-09-20 14:00:00');
+        $evening = $this->runAt('2026-09-20 22:00:00');
+        $dayBefore = $this->runAt('2026-09-19 23:59:59');
+        $dayAfter = $this->runAt('2026-09-21 00:00:00');
+
+        // Inclusive on both days: the whole of the 20th counts, and the run one
+        // second past midnight is outside it.
+        $this->getJson('/admin/classification-results?from=2026-09-20&to=2026-09-20', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonCount(2, 'items')
+            ->assertJsonPath('items.0.id', $evening->id)
+            ->assertJsonPath('items.1.id', $morning->id);
+
+        $this->getJson('/admin/classification-results?from=2026-09-21', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.id', $dayAfter->id);
+
+        $this->getJson('/admin/classification-results?to=2026-09-19', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.id', $dayBefore->id);
+    }
+
+    public function test_index_combines_a_date_range_with_the_other_filters(): void
+    {
+        Stubs::authVerifyOk();
+
+        $wanted = $this->runAt('2026-09-20 10:00:00');
+        $wanted->update(['status' => 'succeeded', 'classification' => 'low', 'final_score' => 30.0]);
+
+        $run = $this->runAt('2026-09-20 11:00:00');
+        $run->update(['status' => 'succeeded', 'classification' => 'high', 'final_score' => 90.0]);
+
+        $run = $this->runAt('2026-09-18 11:00:00');
+        $run->update(['status' => 'succeeded', 'classification' => 'low', 'final_score' => 30.0]);
+
+        $this->getJson('/admin/classification-results?from=2026-09-20&to=2026-09-20&status=succeeded&classification=low', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonCount(1, 'items')
+            ->assertJsonPath('items.0.id', $wanted->id);
+    }
+
+    public function test_index_rejects_an_unsupported_date_bound(): void
+    {
+        Stubs::authVerifyOk();
+        $this->seedRun();
+
+        foreach (['from=20-09-2026', 'from=2026-13-01', 'to=2026-02-31', 'from=yesterday'] as $query) {
+            $this->getJson('/admin/classification-results?'.$query, ['Authorization' => 'Bearer token'])
+                ->assertStatus(422)
+                ->assertJsonPath('detail', 'Unsupported filter value.');
+        }
+    }
+
+    public function test_index_rejects_an_inverted_date_range(): void
+    {
+        Stubs::authVerifyOk();
+        $this->seedRun();
+
+        // Reporting zero runs for an impossible window would read as "nothing
+        // happened then" rather than "these bounds are nonsense".
+        $this->getJson('/admin/classification-results?from=2026-09-20&to=2026-09-19', ['Authorization' => 'Bearer token'])
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'Unsupported filter value.');
+
+        // The same day twice is a valid one-day range.
+        $this->getJson('/admin/classification-results?from=2026-09-20&to=2026-09-20', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 0);
+    }
+
+    public function test_index_treats_blank_date_bounds_as_unfiltered(): void
+    {
+        Stubs::authVerifyOk();
+        $run = $this->runAt('2026-09-01 00:00:00');
+
+        $this->getJson('/admin/classification-results?from=&to=', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.id', $run->id);
+    }
+
+    public function test_stats_respects_the_date_range(): void
+    {
+        Stubs::authVerifyOk();
+
+        $inRange = $this->runAt('2026-09-20 10:00:00');
+        $inRange->update(['status' => 'succeeded', 'classification' => 'low', 'final_score' => 30.0]);
+
+        $before = $this->runAt('2026-09-10 10:00:00');
+        $before->update(['status' => 'succeeded', 'classification' => 'high', 'final_score' => 90.0]);
+
+        $after = $this->runAt('2026-09-25 10:00:00');
+        $after->update(['status' => 'failed', 'classification' => null, 'final_score' => null]);
+
+        // Every number in the payload comes from one scoped query, so the cards
+        // and the mix describe the same window as a list filtered to it.
+        $this->getJson('/admin/classification-results/stats?from=2026-09-20&to=2026-09-20', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('by_status.succeeded', 1)
+            ->assertJsonPath('by_classification.low', 1)
+            ->assertJsonPath('scored', 1)
+            ->assertJsonPath('avg_scored_score', 30)
+            ->assertJsonPath('scored_kept', 1);
+
+        // Unscoped, the same log still reports all three.
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 3)
+            ->assertJsonPath('by_status.failed', 1)
+            ->assertJsonPath('by_classification.high', 1);
+    }
+
+    public function test_stats_rejects_an_unsupported_date_range(): void
+    {
+        Stubs::authVerifyOk();
+
+        $this->getJson('/admin/classification-results/stats?from=nonsense', ['Authorization' => 'Bearer token'])
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'Unsupported filter value.');
+
+        $this->getJson('/admin/classification-results/stats?from=2026-09-20&to=2026-09-19', ['Authorization' => 'Bearer token'])
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'Unsupported filter value.');
+    }
+
+    public function test_stats_still_partitions_the_log_when_filtered(): void
+    {
+        Stubs::authVerifyOk();
+
+        $run = $this->runAt('2026-09-20 10:00:00');
+        $run->update(['status' => 'succeeded', 'classification' => 'disqualify', 'final_score' => 0.0]);
+
+        $run = $this->runAt('2026-09-20 11:00:00');
+        $run->update(['status' => 'succeeded', 'classification' => 'low', 'final_score' => 0.0]);
+
+        $run = $this->runAt('2026-09-20 12:00:00');
+        $run->update(['status' => 'succeeded', 'classification' => 'high', 'final_score' => 90.0]);
+
+        // The whole point of the buckets is that they add up. Scoping one query
+        // must not quietly break that identity for a window.
+        $stats = $this->getJson('/admin/classification-results/stats?from=2026-09-20&to=2026-09-20', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->json();
+
+        $this->assertSame(
+            $stats['total'],
+            $stats['scored_kept'] + $stats['no_signal_kept'] + $stats['by_classification']['disqualify'],
+        );
     }
 }

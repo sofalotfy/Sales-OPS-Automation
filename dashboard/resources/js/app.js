@@ -1,26 +1,40 @@
 /**
- * Auto-submitting filters for the classification log.
+ * Filters that apply as soon as they are chosen.
  *
- * Picking an option applies the filter immediately, so the count above the
- * table and the rows themselves move together with the selection instead of
- * sitting next to a stale result until Apply is pressed.
+ * Every form marked `data-auto-submit` reloads on `change` of any control, so
+ * the count above a table and the rows under it move together instead of
+ * describing different sets until a second click. The apply button is left in
+ * the markup as the no-JavaScript path.
  *
- * A status reached before the scoring stage has no verdict yet, so the
- * classification select is disabled for it and its value cleared: submitting
- * `status=scoring&classification=high` would report an empty log and read as
- * "no high-scoring runs are scoring" rather than "nothing is scored yet". The
- * list of those statuses is published by the controller on the select, so the
- * rule stays in one place; the controller applies the same drop server-side.
+ * Two details are handled per form:
+ *
+ * - A status reached before the scoring stage has no verdict yet, so the
+ *   classification select is disabled for it and its value cleared. Submitting
+ *   `status=scoring&classification=high` would report an empty log and read as
+ *   "no high-scoring runs are scoring" rather than "nothing is scored yet". The
+ *   controller publishes that list on the select so the rule is not restated
+ *   here, and it applies the same drop server-side.
+ *
+ * - The two date bounds cross-limit each other, so the picker cannot choose a
+ *   start after the end. The server rejects that too; this only avoids
+ *   offering it.
  */
-const classificationFilters = document.getElementById('classification-filters');
+document.querySelectorAll('[data-auto-submit]').forEach((form) => {
+    const status = form.querySelector('[data-filter-status]');
+    const classification = form.querySelector('[data-filter-classification]');
+    const hint = form.querySelector('[data-filter-classification-hint]');
+    const from = form.querySelector('input[name="from"]');
+    const to = form.querySelector('input[name="to"]');
 
-if (classificationFilters) {
-    const status = document.getElementById('filter-status');
-    const classification = document.getElementById('filter-classification');
-    const hint = document.getElementById('filter-classification-hint');
-    const preClassificationStatuses = (classification.dataset.preClassificationStatuses ?? '').split(',');
+    const preClassificationStatuses = classification
+        ? (classification.dataset.preClassificationStatuses ?? '').split(',')
+        : [];
 
     const syncClassification = () => {
+        if (!status || !classification) {
+            return;
+        }
+
         const awaitsVerdict = preClassificationStatuses.includes(status.value);
 
         classification.disabled = awaitsVerdict;
@@ -29,15 +43,35 @@ if (classificationFilters) {
             classification.value = '';
         }
 
-        hint.classList.toggle('hidden', !awaitsVerdict);
+        hint?.classList.toggle('hidden', !awaitsVerdict);
     };
 
-    status.addEventListener('change', () => {
+    const syncDateBounds = () => {
+        if (!from || !to) {
+            return;
+        }
+
+        from.removeAttribute('max');
+        to.removeAttribute('min');
+
+        if (to.value) {
+            from.max = to.value;
+        }
+
+        if (from.value) {
+            to.min = from.value;
+        }
+    };
+
+    // `change` bubbles from every control in the form, so one listener covers
+    // the selects and the date inputs alike.
+    form.addEventListener('change', () => {
+        // Synced before submitting so the disabled select is already out of the
+        // query string the form sends.
         syncClassification();
-        classificationFilters.submit();
+        form.submit();
     });
 
-    classification.addEventListener('change', () => classificationFilters.submit());
-
     syncClassification();
-}
+    syncDateBounds();
+});

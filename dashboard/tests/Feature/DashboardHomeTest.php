@@ -10,6 +10,19 @@ use Tests\TestCase;
 
 class DashboardHomeTest extends TestCase
 {
+    /**
+     * Query parameters of an upstream call, parsed off the URI the client
+     * stamped onto it (Laravel includes the query string in `url()`).
+     *
+     * @return array<string, string>
+     */
+    private function parse_query_of(Request $request): array
+    {
+        parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+        return $query;
+    }
+
     public function test_dashboard_home_requires_authentication(): void
     {
         $this->get(route('dashboard'))->assertRedirect(route('login.show'));
@@ -206,5 +219,74 @@ class DashboardHomeTest extends TestCase
             ->assertRedirect(route('dashboard'));
 
         $this->assertTrue(UpstreamSession::authenticated());
+    }
+
+    public function test_dashboard_home_scopes_stats_and_runs_to_the_date_range(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeDashboardRuns(UpstreamStubs::classificationStats(total: 5));
+
+        $this->get(route('dashboard', ['from' => '2026-09-20', 'to' => '2026-09-27']))
+            ->assertOk()
+            ->assertSee('2026-09-20', false)
+            ->assertSee('2026-09-27', false);
+
+        $queries = [];
+        Http::assertSent(function (Request $request) use (&$queries): bool {
+            $queries[$request->url()] = $this->parse_query_of($request);
+
+            return true;
+        });
+
+        // Both calls carry the window. The cards are aggregates and the list is
+        // rows; scoping only one leaves the page claiming a period its own run
+        // list does not belong to.
+        $this->assertCount(2, $queries);
+        foreach ($queries as $url => $query) {
+            $this->assertSame('2026-09-20', $query['from'] ?? null, $url);
+            $this->assertSame('2026-09-27', $query['to'] ?? null, $url);
+        }
+    }
+
+    public function test_dashboard_home_omits_an_absent_range(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeDashboardRuns(UpstreamStubs::classificationStats());
+
+        $this->get(route('dashboard'))->assertOk();
+
+        Http::assertSent(function (Request $request): bool {
+            $query = $this->parse_query_of($request);
+
+            return ! array_key_exists('from', $query) && ! array_key_exists('to', $query);
+        });
+    }
+
+    public function test_dashboard_home_drops_a_date_bound_that_is_not_a_real_day(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeDashboardRuns(UpstreamStubs::classificationStats(total: 139));
+
+        // Sent upstream verbatim this would come back 422 and blank the cards.
+        $this->get(route('dashboard', ['from' => '20-09-2026']))
+            ->assertOk()
+            ->assertSee('139', false);
+
+        Http::assertSent(function (Request $request): bool {
+            return ! array_key_exists('from', $this->parse_query_of($request));
+        });
+    }
+
+    public function test_dashboard_home_reports_an_inverted_range_instead_of_querying(): void
+    {
+        $this->signIn();
+
+        $this->get(route('dashboard', ['from' => '2026-09-27', 'to' => '2026-09-20']))
+            ->assertOk()
+            ->assertSee('The start date must not be after the end date.');
+
+        // Reporting zero runs for an impossible window would read as "nothing
+        // happened then" rather than "these bounds are nonsense".
+        Http::assertNothingSent();
     }
 }

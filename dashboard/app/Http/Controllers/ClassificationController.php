@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\InquiryHandlerApiClient;
+use App\Support\CalendarRange;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Http\RedirectResponse;
@@ -52,6 +53,8 @@ class ClassificationController extends Controller
 
     public function index(Request $request): View|RedirectResponse
     {
+        $range = CalendarRange::fromRequest($request);
+
         $page = max(1, (int) $request->integer('page', 1));
         $offset = ($page - 1) * self::PAGE_SIZE;
 
@@ -68,6 +71,32 @@ class ClassificationController extends Controller
 
         if (! $classificationSelectable) {
             $classification = null;
+        }
+
+        // A start after the end is a request with no answer rather than a typo,
+        // so it is reported in the form instead of being sent upstream to come
+        // back 422 and blank the log.
+        $rangeError = $range->isReversed()
+            ? 'The start date must not be after the end date.'
+            : null;
+
+        if ($rangeError !== null) {
+            return view('classification.index', [
+                'factors' => [],
+                'weightsError' => null,
+                'results' => [],
+                'resultsError' => $rangeError,
+                'total' => 0,
+                'page' => 1,
+                'pageCount' => 1,
+                'statusFilter' => null,
+                'classificationFilter' => null,
+                'classificationSelectable' => true,
+                'preClassificationStatuses' => self::PRE_CLASSIFICATION_STATUSES,
+                'statuses' => self::STATUSES,
+                'classifications' => self::CLASSIFICATIONS,
+                'range' => $range,
+            ]);
         }
 
         $client = app(InquiryHandlerApiClient::class);
@@ -89,7 +118,14 @@ class ClassificationController extends Controller
         $resultsError = null;
         $total = 0;
         $resultsResponse = $this->call(
-            fn () => $client->getClassificationResults(self::PAGE_SIZE, $offset, $status, $classification),
+            fn () => $client->getClassificationResults(
+                self::PAGE_SIZE,
+                $offset,
+                $status,
+                $classification,
+                $range->from,
+                $range->to,
+            ),
         );
         if ($resultsResponse === null) {
             $resultsError = self::LOG_UNAVAILABLE;
@@ -116,6 +152,7 @@ class ClassificationController extends Controller
             'classifications' => self::CLASSIFICATIONS,
             'classificationSelectable' => $classificationSelectable,
             'preClassificationStatuses' => self::PRE_CLASSIFICATION_STATUSES,
+            'range' => $range,
         ]);
     }
 

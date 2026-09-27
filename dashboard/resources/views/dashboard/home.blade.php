@@ -48,6 +48,24 @@
 
     <x-upstream-error message="{{ $statsError ?? '' }}" />
 
+    {{-- The window every number below is scoped to. Same control and semantics
+         as the classification log's, so the two pages can be read against each
+         other. It auto-submits on change, so there is no apply button. --}}
+    <form
+        method="GET"
+        action="{{ route('dashboard') }}"
+        data-auto-submit
+        class="mb-6 flex flex-wrap items-end gap-3"
+    >
+        <x-date-range :range="$range" />
+
+        @unless ($range->isEmpty())
+            <a href="{{ route('dashboard') }}" class="py-2 text-sm font-medium text-slate-500 hover:text-slate-700">
+                Clear
+            </a>
+        @endunless
+    </form>
+
     @if ($stats === null)
         <div class="rounded-lg border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
             <p class="text-sm text-slate-600">Run statistics are unavailable while the inquiry handler is unreachable.</p>

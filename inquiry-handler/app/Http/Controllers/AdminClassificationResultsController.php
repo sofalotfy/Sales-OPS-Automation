@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Enums\Classification;
 use App\Enums\InquiryRunStatus;
 use App\Services\ClassificationResultsService;
+use DateTimeImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -36,13 +37,14 @@ class AdminClassificationResultsController extends Controller
             fn (Classification $case): string => $case->value,
             Classification::cases(),
         ));
+        $range = $this->dateRange($request);
 
-        if ($status === false || $classification === false) {
+        if ($status === false || $classification === false || $range === false) {
             return response()->json(['detail' => 'Unsupported filter value.'], 422);
         }
 
         try {
-            return response()->json($this->results->list($limit, $offset, $status, $classification));
+            return response()->json($this->results->list($limit, $offset, $status, $classification, $range[0], $range[1]));
         } catch (Throwable $e) {
             Log::error('Failed to list classification results.', ['error' => $e->getMessage()]);
 
@@ -67,10 +69,61 @@ class AdminClassificationResultsController extends Controller
         return in_array($value, $allowed, true) ? $value : false;
     }
 
-    public function stats(): JsonResponse
+    /**
+     * Reads the optional inclusive calendar-day range off the query string.
+     *
+     * @return array{0: ?string, 1: ?string}|false the bounds, false when unsupported
+     */
+    private function dateRange(Request $request): array|false
     {
+        $from = $this->date($request, 'from');
+        $to = $this->date($request, 'to');
+
+        if ($from === false || $to === false) {
+            return false;
+        }
+
+        // An inverted range is a caller bug, not an empty result. Answering with
+        // zero rows would read as "nothing ran in that window" when the window
+        // itself is impossible, which is a different claim.
+        if ($from !== null && $to !== null && $from > $to) {
+            return false;
+        }
+
+        return [$from, $to];
+    }
+
+    /**
+     * Reads one `Y-m-d` bound off the query string.
+     *
+     * @return string|null the bound, null when absent/empty, false when unsupported
+     */
+    private function date(Request $request, string $key): string|null|false
+    {
+        $value = $request->query($key);
+
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        // createFromFormat alone accepts `2026-13-01` and `2026-02-31` by rolling
+        // them over into the next month, so the round-trip check is what makes
+        // this reject a day that does not exist.
+        $parsed = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+
+        return $parsed !== false && $parsed->format('Y-m-d') === $value ? $value : false;
+    }
+
+    public function stats(Request $request): JsonResponse
+    {
+        $range = $this->dateRange($request);
+
+        if ($range === false) {
+            return response()->json(['detail' => 'Unsupported filter value.'], 422);
+        }
+
         try {
-            return response()->json($this->results->stats());
+            return response()->json($this->results->stats($range[0], $range[1]));
         } catch (Throwable $e) {
             Log::error('Failed to aggregate classification statistics.', ['error' => $e->getMessage()]);
 

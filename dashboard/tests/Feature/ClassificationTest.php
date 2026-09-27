@@ -278,6 +278,86 @@ class ClassificationTest extends TestCase
             );
     }
 
+    public function test_index_forwards_the_date_range_upstream(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1)],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index', ['from' => '2026-09-20', 'to' => '2026-09-27']))
+            ->assertOk()
+            ->assertSee('2026-09-20', false)
+            ->assertSee('2026-09-27', false);
+
+        // The window has to reach the handler: filtering the page already fetched
+        // would show three rows beside a total of 139 and hide the rest.
+        $query = $this->sentListQuery();
+        $this->assertSame('2026-09-20', $query['from'] ?? null);
+        $this->assertSame('2026-09-27', $query['to'] ?? null);
+    }
+
+    public function test_index_pagination_links_carry_the_date_range(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1)],
+                'total' => 45,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        // Dropping the window on page 2 would widen the period being paged.
+        $this->get(route('classification.index', ['from' => '2026-09-20', 'to' => '2026-09-27']))
+            ->assertOk()
+            ->assertSee('from=2026-09-20&amp;to=2026-09-27&amp;page=2', false);
+    }
+
+    public function test_index_drops_a_date_bound_that_is_not_a_real_day(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1)],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        // Forwarded verbatim these would come back 422 and blank the whole log.
+        $this->get(route('classification.index', ['from' => '20-09-2026', 'to' => '2026-02-31']))
+            ->assertOk()
+            ->assertSee('Recent classifications');
+
+        $query = $this->sentListQuery();
+        $this->assertArrayNotHasKey('from', $query);
+        $this->assertArrayNotHasKey('to', $query);
+    }
+
+    public function test_index_reports_an_inverted_range_instead_of_querying(): void
+    {
+        $this->signIn();
+
+        // An empty table for a start after the end would read as "nothing ran
+        // then", which is a different claim from "those bounds are nonsense".
+        $this->get(route('classification.index', ['from' => '2026-09-27', 'to' => '2026-09-20']))
+            ->assertOk()
+            ->assertSee('The start date must not be after the end date.');
+
+        Http::assertNothingSent();
+    }
+
     public function test_index_renders_in_flight_runs_with_neutral_badge_and_placeholder(): void
     {
         $this->signIn();

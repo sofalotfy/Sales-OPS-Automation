@@ -88,18 +88,19 @@
         @php($filterQuery = array_filter([
             'status' => $statusFilter,
             'classification' => $classificationFilter,
-        ], fn ($value): bool => $value !== null))
+        ] + $range->toQuery(), fn ($value): bool => $value !== null))
 
         <form
-            id="classification-filters"
             method="GET"
             action="{{ route('classification.index') }}"
+            data-auto-submit
             class="mb-4 flex flex-wrap items-end gap-3"
         >
             <div>
                 <label for="filter-status" class="mb-1 block text-xs font-medium text-slate-500">Status</label>
                 <select
                     id="filter-status"
+                    data-filter-status
                     name="status"
                     class="block rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-sky-500"
                 >
@@ -118,6 +119,7 @@
                      copy of it kept in JavaScript. --}}
                 <select
                     id="filter-classification"
+                    data-filter-classification
                     name="classification"
                     data-pre-classification-statuses="{{ implode(',', $preClassificationStatuses) }}"
                     @disabled(! $classificationSelectable)
@@ -128,14 +130,16 @@
                         <option value="{{ $classificationOption }}" @selected($classificationFilter === $classificationOption)>{{ ucfirst($classificationOption) }}</option>
                     @endforeach
                 </select>
-                <p id="filter-classification-hint" class="mt-1 max-w-[16rem] text-xs text-slate-400 {{ $classificationSelectable ? 'hidden' : '' }}">
+                <p data-filter-classification-hint class="mt-1 max-w-[16rem] text-xs text-slate-400 {{ $classificationSelectable ? 'hidden' : '' }}">
                     No verdict yet at this stage, so runs here are not filtered by classification.
                 </p>
             </div>
 
+            <x-date-range :range="$range" />
+
             {{-- Applying a filter always restarts at page 1: page 7 of a set that
-                 now holds two pages is an empty table, not the last page. The
-                 selects submit themselves on change, so this button only matters
+                 now holds two pages is an empty table, not the last page. Every
+                 control submits itself on change, so this button only matters
                  without JavaScript. --}}
             <button type="submit" class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500">
                 Apply filters
