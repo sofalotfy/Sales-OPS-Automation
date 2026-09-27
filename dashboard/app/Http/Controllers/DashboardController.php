@@ -2,8 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\InquiryHandlerApiClient;
 use App\Services\RagApiClient;
 use App\Support\UpstreamSession;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Response as ClientResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Response;
@@ -11,6 +14,9 @@ use Illuminate\View\View;
 
 class DashboardController extends Controller
 {
+    /** How many of the newest runs the landing page lists. */
+    private const RECENT_RUN_LIMIT = 10;
+
     /** Public liveness probe for the Compose healthcheck. */
     public function health(): JsonResponse
     {
@@ -18,50 +24,53 @@ class DashboardController extends Controller
     }
 
     /**
-     * Dashboard home — overview of the RAG corpus (stat cards + recent docs).
-     * Documents live on their own sub-page below it.
+     * Dashboard home — overview of the inquiry classification log (run stat cards,
+     * classification mix, anything failed, and the newest runs).
+     *
+     * Both sections are fetched independently and degrade on their own so a
+     * failure in one does not blank the page. The RAG corpus has its own tab;
+     * it is deliberately absent here even though the pipeline retrieves from it.
      */
     public function home(): View|RedirectResponse
     {
-        $token = UpstreamSession::token() ?? '';
-        $rag = app(RagApiClient::class);
+        $handler = app(InquiryHandlerApiClient::class);
 
-        $error = null;
-        $counts = ['ready' => 0, 'processing' => 0, 'failed' => 0];
-
-        foreach (array_keys($counts) as $status) {
-            $response = $rag->listDocuments($token, status: $status, limit: 1);
-            if ($response->status() === 401) {
-                return redirect()->route('login.show');
-            }
-            if ($response->failed()) {
-                $error = $response->json('detail')
-                    ?? 'The document service is unavailable. Please try again.';
-                break;
-            }
-            $counts[$status] = (int) $response->json('total', 0);
+        $statsResponse = $this->call(fn (): ClientResponse => $handler->getClassificationStats());
+        if ($statsResponse?->status() === 401) {
+            return redirect()->route('login.show');
         }
 
-        $recent = [];
-        if ($error === null) {
-            $response = $rag->listDocuments($token, limit: 8);
-            if ($response->status() === 401) {
-                return redirect()->route('login.show');
-            }
-            if ($response->failed()) {
-                $error = $response->json('detail')
-                    ?? 'The document service is unavailable. Please try again.';
-            } else {
-                $recent = $response->json('items', []);
-            }
+        $resultsResponse = $this->call(fn (): ClientResponse => $handler->getClassificationResults(self::RECENT_RUN_LIMIT));
+        if ($resultsResponse?->status() === 401) {
+            return redirect()->route('login.show');
         }
 
         return view('dashboard.home', [
-            'counts' => $counts,
-            'recent' => $recent,
-            'total' => array_sum($counts),
-            'error' => $error,
+            'stats' => $statsResponse?->successful() ? $statsResponse->json() : null,
+            'statsError' => $statsResponse === null || $statsResponse->failed()
+                ? ($statsResponse?->json('detail') ?? 'The inquiry handler is unavailable. Please try again.')
+                : null,
+            'results' => $resultsResponse?->successful() ? $resultsResponse->json('items', []) : [],
+            'resultsError' => $resultsResponse === null || $resultsResponse->failed()
+                ? ($resultsResponse?->json('detail') ?? 'The inquiry handler is unavailable. Please try again.')
+                : null,
+            'total' => $statsResponse?->successful() ? (int) $statsResponse->json('total', 0) : null,
         ]);
+    }
+
+    /**
+     * Run an upstream admin call, converting a connection timeout/transport
+     * failure into null so callers degrade gracefully.
+     *
+     * @param  callable(): ClientResponse  $request
+     */
+    private function call(callable $request): ?ClientResponse
+    {
+        try {
+            return $request();
+        } catch (ConnectionException) {
+            return null;
+        }
     }
 
     /** Documents list — hosts the DocumentsTable Livewire component. */

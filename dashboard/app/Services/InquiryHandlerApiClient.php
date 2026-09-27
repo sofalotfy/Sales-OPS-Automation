@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Support\UpstreamSession;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 
@@ -17,9 +18,7 @@ use Illuminate\Support\Facades\Http;
  */
 class InquiryHandlerApiClient
 {
-    public function __construct(private readonly ?string $baseUrl = null)
-    {
-    }
+    public function __construct(private readonly ?string $baseUrl = null) {}
 
     private function baseUrl(): string
     {
@@ -56,6 +55,18 @@ class InquiryHandlerApiClient
         return $this->authenticatedRequest()->get("/admin/classification-results/{$id}");
     }
 
+    /**
+     * Whole-log aggregates for the landing page (contracts/classification-reporting.md).
+     *
+     * Distinct from getClassificationResults(): that describes a single page and
+     * caps at 50 rows, so status/classification counts taken from it would
+     * silently under-report once the log outgrows a page.
+     */
+    public function getClassificationStats(): Response
+    {
+        return $this->authenticatedRequest()->get('/admin/classification-results/stats');
+    }
+
     /** Every catalog sector (GET /admin/sectors, contracts/sectors-admin.md). */
     public function getIndustrySectors(): Response
     {
@@ -88,7 +99,7 @@ class InquiryHandlerApiClient
         return $this->authenticatedRequest()->delete("/admin/sectors/{$id}");
     }
 
-    private function authenticatedRequest(): \Illuminate\Http\Client\PendingRequest
+    private function authenticatedRequest(): PendingRequest
     {
         $request = Http::baseUrl($this->baseUrl())->acceptJson()->timeout(5);
 

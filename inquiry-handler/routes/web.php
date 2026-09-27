@@ -47,7 +47,12 @@ Route::middleware(VerifyUpstreamToken::class)->group(function () {
 
     Route::get('/admin/classification-results', [AdminClassificationResultsController::class, 'index'])
         ->name('admin.classification-results.index');
+    // Declared before the {id} route and paired with the whereNumber constraint
+    // below, so "stats" can never be swallowed by show().
+    Route::get('/admin/classification-results/stats', [AdminClassificationResultsController::class, 'stats'])
+        ->name('admin.classification-results.stats');
     Route::get('/admin/classification-results/{id}', [AdminClassificationResultsController::class, 'show'])
+        ->whereNumber('id')
         ->name('admin.classification-results.show');
 
     Route::get('/admin/sectors', [AdminIndustrySectorsController::class, 'index'])

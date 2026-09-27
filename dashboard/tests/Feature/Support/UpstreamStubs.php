@@ -84,10 +84,12 @@ class UpstreamStubs
         string $createdAt = '2026-09-14T10:00:00+00:00',
         ?string $webResearchOutcome = null,
         ?string $status = 'succeeded',
+        ?string $error = null,
     ): array {
         return [
             'id' => $id,
             'status' => $status,
+            'error' => $error,
             'classification' => $classification,
             'final_score' => $score,
             'inquiry_message' => $message,
@@ -441,34 +443,42 @@ class UpstreamStubs
     }
 
     /**
-     * Dashboard home overview: three status-filtered list calls returning
-     * their per-status totals, plus one unscoped call for recent documents.
+     * Dashboard home overview: the whole-log aggregates plus one page of the
+     * newest runs, matching the two calls home() makes.
      */
-    public static function fakeDashboardTotals(
-        int $ready,
-        int $processing,
-        int $failed,
+    public static function fakeDashboardRuns(
+        array $stats,
         array $recentItems = [],
     ): void {
-        $totals = ['ready' => $ready, 'processing' => $processing, 'failed' => $failed];
-
-        Http::fake(function (Request $request) use ($totals, $recentItems) {
-            $query = [];
-            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
-            $status = $query['status'] ?? null;
-
-            if ($status !== null) {
-                return Http::response(
-                    ['items' => [], 'total' => $totals[$status] ?? 0, 'limit' => 1, 'offset' => 0],
-                    200,
-                );
+        Http::fake(function (Request $request) use ($stats, $recentItems) {
+            if (str_contains($request->url(), '/classification-results/stats')) {
+                return Http::response($stats, 200);
             }
 
-            return Http::response(
-                ['items' => $recentItems, 'total' => count($recentItems), 'limit' => 8, 'offset' => 0],
-                200,
-            );
+            return Http::response([
+                'items' => $recentItems,
+                'total' => (int) ($stats['total'] ?? count($recentItems)),
+                'limit' => 20,
+                'offset' => 0,
+            ], 200);
         });
+    }
+
+    /** Whole-log aggregates shaped like inquiry-handler's stats endpoint. */
+    public static function classificationStats(
+        int $total = 139,
+        array $byStatus = ['succeeded' => 139],
+        array $byClassification = ['low' => 62, 'disqualify' => 56, 'medium' => 14, 'high' => 7],
+        int $refusals = 0,
+        ?float $avgScore = 41.2,
+    ): array {
+        return [
+            'total' => $total,
+            'by_status' => $byStatus,
+            'by_classification' => $byClassification,
+            'refusals' => $refusals,
+            'avg_score' => $avgScore,
+        ];
     }
 
     public static function fakeDocumentDelete(string $id = 'doc-1'): void

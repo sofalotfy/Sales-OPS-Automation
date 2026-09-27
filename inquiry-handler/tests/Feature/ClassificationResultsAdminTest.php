@@ -217,4 +217,124 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertStatus(404)
             ->assertJsonPath('detail', 'Classification result not found.');
     }
+
+    public function test_stats_counts_the_whole_log_not_just_one_page(): void
+    {
+        Stubs::authVerifyOk();
+        foreach (range(1, 3) as $ignored) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded']);
+        }
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 3)
+            ->assertJsonPath('by_status.succeeded', 3)
+            ->assertJsonPath('by_classification.medium', 3)
+            ->assertJsonPath('refusals', 0)
+            ->assertJsonPath('avg_score', 72);
+    }
+
+    public function test_stats_groups_rows_with_no_status_under_unknown(): void
+    {
+        Stubs::authVerifyOk();
+        $this->seedRun();
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('by_status.unknown', 1);
+    }
+
+    public function test_stats_separates_lifecycle_states_and_refusals(): void
+    {
+        Stubs::authVerifyOk();
+        $succeeded = $this->seedRun();
+        $succeeded->update(['status' => 'succeeded']);
+
+        $queued = $this->seedRun();
+        $queued->update(['status' => 'queued', 'classification' => null, 'final_score' => null]);
+
+        $failed = $this->seedRun();
+        $failed->update([
+            'status' => 'failed',
+            'classification' => 'disqualify',
+            'final_score' => 10.0,
+            'refusal' => 'We are not able to help with this inquiry.',
+        ]);
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 3)
+            ->assertJsonPath('by_status.succeeded', 1)
+            ->assertJsonPath('by_status.queued', 1)
+            ->assertJsonPath('by_status.failed', 1)
+            ->assertJsonPath('by_classification.medium', 1)
+            ->assertJsonPath('by_classification.disqualify', 1)
+            ->assertJsonPath('refusals', 1)
+            ->assertJsonPath('avg_score', 41);
+    }
+
+    public function test_stats_omits_rows_that_have_no_classification_yet(): void
+    {
+        Stubs::authVerifyOk();
+        $done = $this->seedRun();
+        $done->update(['status' => 'succeeded']);
+
+        $pending = $this->seedRun();
+        $pending->update(['status' => 'scoring', 'classification' => null, 'final_score' => null]);
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonPath('by_status.scoring', 1)
+            ->assertJsonPath('by_classification', ['medium' => 1]);
+    }
+
+    public function test_stats_rounds_a_fractional_average_to_two_places(): void
+    {
+        Stubs::authVerifyOk();
+        foreach ([72.0, 10.0, 33.0] as $score) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'final_score' => $score]);
+        }
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            // (72 + 10 + 33) / 3 = 38.3333…
+            ->assertJsonPath('avg_score', 38.33);
+    }
+
+    public function test_stats_on_empty_log_returns_zeroes(): void
+    {
+        Stubs::authVerifyOk();
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 0)
+            ->assertJsonPath('by_status', [])
+            ->assertJsonPath('by_classification', [])
+            ->assertJsonPath('refusals', 0)
+            ->assertJsonPath('avg_score', null);
+    }
+
+    public function test_stats_requires_upstream_token(): void
+    {
+        $this->getJson('/admin/classification-results/stats')
+            ->assertStatus(401)
+            ->assertJsonPath('detail', 'Not authenticated.');
+
+        Http::assertNothingSent();
+    }
+
+    public function test_stats_returns_503_when_log_unreadable(): void
+    {
+        Stubs::authVerifyOk();
+        $this->seedRun();
+        Schema::drop('classification_results');
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertStatus(503)
+            ->assertJsonPath('detail', 'Classification log unavailable.');
+    }
 }

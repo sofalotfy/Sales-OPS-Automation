@@ -15,9 +15,7 @@ use Throwable;
  */
 class AdminClassificationResultsController extends Controller
 {
-    public function __construct(private readonly ClassificationResultsService $results)
-    {
-    }
+    public function __construct(private readonly ClassificationResultsService $results) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -29,6 +27,17 @@ class AdminClassificationResultsController extends Controller
             return response()->json($this->results->list($limit, $offset));
         } catch (Throwable $e) {
             Log::error('Failed to list classification results.', ['error' => $e->getMessage()]);
+
+            return response()->json(['detail' => 'Classification log unavailable.'], 503);
+        }
+    }
+
+    public function stats(): JsonResponse
+    {
+        try {
+            return response()->json($this->results->stats());
+        } catch (Throwable $e) {
+            Log::error('Failed to aggregate classification statistics.', ['error' => $e->getMessage()]);
 
             return response()->json(['detail' => 'Classification log unavailable.'], 503);
         }

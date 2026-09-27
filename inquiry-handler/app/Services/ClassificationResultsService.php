@@ -46,6 +46,64 @@ class ClassificationResultsService
     }
 
     /**
+     * Whole-log aggregates for the dashboard landing page. `list()` can only
+     * describe one page (capped at 50 rows), so status/classification counts
+     * taken from it would silently under-report once the log outgrows a page.
+     *
+     * Aggregated on the query builder rather than the model so the
+     * `InquiryRunStatus` / `Classification` enum casts on those columns do not
+     * interfere with grouping, and `final_score` is averaged as a raw column
+     * for the same reason.
+     *
+     * @return array{
+     *     total: int,
+     *     by_status: array<string, int>,
+     *     by_classification: array<string, int>,
+     *     refusals: int,
+     *     avg_score: float|null
+     * }
+     *
+     * @throws Throwable when the scoped store is unreadable
+     */
+    public function stats(): array
+    {
+        $base = ClassificationResult::query()->toBase();
+
+        $byStatus = [];
+        foreach ((clone $base)->selectRaw('status, count(*) as total')->groupBy('status')->get() as $row) {
+            // `status` is nullable and rows created before the lifecycle columns
+            // defaulted to succeeded via backfill, so group any stragglers under
+            // an explicit "unknown" rather than emitting an empty JSON key.
+            $byStatus[(string) ($row->status ?? 'unknown')] = (int) $row->total;
+        }
+
+        $byClassification = [];
+        foreach ((clone $base)
+            ->whereNotNull('classification')
+            ->selectRaw('classification, count(*) as total')
+            ->groupBy('classification')
+            ->get() as $row) {
+            $byClassification[(string) $row->classification] = (int) $row->total;
+        }
+
+        // Postgres returns avg() as a bare numeric and JSON cannot distinguish a
+        // whole float from an int, so the average is rounded to a fixed 2dp for
+        // a stable, display-ready number.
+        $avgScore = (clone $base)->avg('final_score');
+
+        return [
+            'total' => (int) (clone $base)->count(),
+            'by_status' => $byStatus,
+            'by_classification' => $byClassification,
+            'refusals' => (int) (clone $base)
+                ->whereNotNull('refusal')
+                ->where('refusal', '<>', '')
+                ->count(),
+            'avg_score' => $avgScore === null ? null : round((float) $avgScore, 2),
+        ];
+    }
+
+    /**
      * Full row for one classification run; null when the id does not exist.
      *
      * @return array<string, mixed>|null
