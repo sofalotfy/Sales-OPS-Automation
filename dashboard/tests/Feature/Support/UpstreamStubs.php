@@ -474,6 +474,8 @@ class UpstreamStubs
         int $scored = 36,
         int $noSignal = 103,
         ?float $avgScoredScore = 55.77,
+        int $scoredKept = 35,
+        int $noSignalKept = 48,
     ): array {
         return [
             'total' => $total,
@@ -484,6 +486,8 @@ class UpstreamStubs
             'scored' => $scored,
             'no_signal' => $noSignal,
             'avg_scored_score' => $avgScoredScore,
+            'scored_kept' => $scoredKept,
+            'no_signal_kept' => $noSignalKept,
         ];
     }
 

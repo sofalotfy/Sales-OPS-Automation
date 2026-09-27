@@ -28,6 +28,11 @@ class DashboardHomeTest extends TestCase
                 noSignal: 103,
                 avgScoredScore: 55.77,
                 byClassificationNoSignal: ['disqualify' => 55, 'low' => 48],
+                // A coherent partition: 35 + 45 + 56 disqualified + 2 failed +
+                // 1 in flight = 139. The two failed and the in-flight run are
+                // not "kept", so they come out of the kept buckets.
+                scoredKept: 35,
+                noSignalKept: 45,
             ),
             [
                 UpstreamStubs::classificationResult(id: 9, classification: 'high', score: 88),
@@ -37,15 +42,27 @@ class DashboardHomeTest extends TestCase
 
         $this->get(route('dashboard'))
             ->assertOk()
-            ->assertSee('Total runs')
-            ->assertSee('139')
+            // `>Runs</p>` is the stat card's own label markup, so this cannot be
+            // satisfied by "Recent runs" or "View all runs".
+            ->assertSee('<p class="text-sm text-slate-500">Runs</p>', false)
+            ->assertSee('<p class="mt-1 text-2xl font-semibold text-slate-900">139</p>', false)
             ->assertSee('Succeeded')
-            ->assertSee('136')
+            ->assertSee('Disqualified')
             ->assertSee('Failed')
             ->assertSee('In flight')
+            // Each card's value is pinned to its own colour so a number cannot
+            // satisfy the wrong card. "Succeeded" is the scored kept runs and
+            // "Failed" the kept runs that found no signal, so neither is the
+            // 136 succeeded runs reported by status.
+            ->assertSee('<p class="mt-1 text-2xl font-semibold text-emerald-600">35</p>', false)
+            ->assertSee('<p class="mt-1 text-2xl font-semibold text-amber-600">56</p>', false)
+            ->assertSee('<p class="mt-1 text-2xl font-semibold text-red-600">45</p>', false)
             // Only the in-flight card carries the sky-600 value styling, so this
             // pins `researching: 1` to that card rather than any other number.
             ->assertSee('<p class="mt-1 text-2xl font-semibold text-sky-600">1</p>', false)
+            // "Failed" means no usable signal, so the card has to say so rather
+            // than let a reader assume it counts crashed runs.
+            ->assertSee('no usable signal')
             ->assertSee('Usable signal')
             ->assertSee('Avg score (scored runs)')
             ->assertSee('55.77')
@@ -177,7 +194,7 @@ class DashboardHomeTest extends TestCase
             // The stat cards are suppressed, but the recent-runs table still renders.
             ->assertSee('Recent runs')
             ->assertSee('Medium')
-            ->assertDontSee('Total runs');
+            ->assertDontSee('<p class="text-sm text-slate-500">Runs</p>', false);
     }
 
     public function test_login_redirects_to_dashboard_home(): void

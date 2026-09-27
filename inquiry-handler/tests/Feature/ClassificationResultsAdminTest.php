@@ -382,6 +382,112 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('avg_scored_score', null);
     }
 
+    public function test_stats_splits_kept_runs_by_whether_they_scored_anything(): void
+    {
+        Stubs::authVerifyOk();
+
+        // kept and scored
+        foreach ([72.0, 55.0, 30.0] as $score) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'final_score' => $score, 'classification' => 'medium']);
+        }
+
+        // kept but no signal: the empty-catalog rule records 0 as `low`
+        foreach (range(1, 2) as $ignored) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'final_score' => 0.0, 'classification' => 'low']);
+        }
+
+        // disqualified however it got there: scored below 30, or a gate decline
+        $run = $this->seedRun();
+        $run->update(['status' => 'succeeded', 'final_score' => 22.0, 'classification' => 'disqualify']);
+
+        $run = $this->seedRun();
+        $run->update([
+            'status' => 'succeeded',
+            'final_score' => 0.0,
+            'classification' => 'disqualify',
+            'refusal' => 'That company is outside the scope we serve.',
+        ]);
+
+        // a succeeded run with no verdict yet must not slip between the buckets
+        $run = $this->seedRun();
+        $run->update(['status' => 'succeeded', 'final_score' => 0.0, 'classification' => null]);
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 8)
+            // The verdict wins over the score: a disqualified run is disqualified
+            // however it scored, and a kept run is split only on whether the
+            // factor produced anything.
+            ->assertJsonPath('by_classification.disqualify', 2)
+            ->assertJsonPath('scored_kept', 3)
+            // The two 0-score `low` runs plus the null-verdict run, which counts
+            // as kept so the partition cannot leak a row.
+            ->assertJsonPath('no_signal_kept', 3);
+    }
+
+    public function test_stats_kept_buckets_exclude_failed_runs_so_they_still_count_as_failed(): void
+    {
+        Stubs::authVerifyOk();
+
+        $run = $this->seedRun();
+        $run->update(['status' => 'failed', 'final_score' => 72.0, 'classification' => 'medium']);
+
+        $run = $this->seedRun();
+        $run->update(['status' => 'failed', 'final_score' => 0.0, 'classification' => 'low']);
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonPath('by_status.failed', 2)
+            // A crashed run is never "kept", even when it had already scored, so
+            // it stays in the failed bucket and is counted exactly once.
+            ->assertJsonPath('scored_kept', 0)
+            ->assertJsonPath('no_signal_kept', 0);
+    }
+
+    public function test_stats_buckets_partition_every_run_exactly_once(): void
+    {
+        Stubs::authVerifyOk();
+
+        $scenarios = [
+            ['status' => 'succeeded', 'final_score' => 72.0, 'classification' => 'high'],
+            ['status' => 'succeeded', 'final_score' => 0.0, 'classification' => 'low'],
+            ['status' => 'succeeded', 'final_score' => 22.0, 'classification' => 'disqualify'],
+            ['status' => 'succeeded', 'final_score' => 0.0, 'classification' => null],
+            ['status' => 'failed', 'final_score' => 0.0, 'classification' => 'low'],
+            ['status' => 'queued', 'final_score' => null, 'classification' => null],
+            ['status' => 'scoring', 'final_score' => null, 'classification' => null],
+        ];
+
+        foreach ($scenarios as $scenario) {
+            $run = $this->seedRun();
+            $run->update($scenario);
+        }
+
+        $stats = $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->json();
+
+        $inFlight = ['queued', 'processing', 'researching', 'scope_check', 'scoring'];
+        $inFlightCount = 0;
+        foreach ($inFlight as $status) {
+            $inFlightCount += (int) ($stats['by_status'][$status] ?? 0);
+        }
+
+        $partitioned = $stats['scored_kept']
+            + $stats['no_signal_kept']
+            + ($stats['by_classification']['disqualify'] ?? 0)
+            + ($stats['by_status']['failed'] ?? 0)
+            + $inFlightCount;
+
+        // The dashboard renders one card per bucket, so a run must never fall
+        // between them or be counted twice. This is the guarantee the row's
+        // numbers add up to the total.
+        $this->assertSame($stats['total'], $partitioned);
+    }
+
     public function test_stats_on_empty_log_returns_zeroes(): void
     {
         Stubs::authVerifyOk();
@@ -395,7 +501,9 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('refusals', 0)
             ->assertJsonPath('scored', 0)
             ->assertJsonPath('no_signal', 0)
-            ->assertJsonPath('avg_scored_score', null);
+            ->assertJsonPath('avg_scored_score', null)
+            ->assertJsonPath('scored_kept', 0)
+            ->assertJsonPath('no_signal_kept', 0);
     }
 
     public function test_stats_requires_upstream_token(): void

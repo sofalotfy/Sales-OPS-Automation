@@ -71,7 +71,9 @@ class ClassificationResultsService
      *     refusals: int,
      *     scored: int,
      *     no_signal: int,
-     *     avg_scored_score: float|null
+     *     avg_scored_score: float|null,
+     *     scored_kept: int,
+     *     no_signal_kept: int
      * }
      *
      * @throws Throwable when the scoped store is unreadable
@@ -124,6 +126,26 @@ class ClassificationResultsService
         // a stable, display-ready number.
         $avgScoredScore = (clone $base)->where('final_score', '>', 0)->avg('final_score');
 
+        // The two "kept" buckets, split on whether the run produced a usable
+        // score. Together with `by_classification.disqualify`, the terminal
+        // `by_status.failed` count and the non-terminal statuses these partition
+        // the whole log, so a dashboard can render every run exactly once:
+        //
+        //   scored_kept + no_signal_kept + disqualify + failed + in_flight == total
+        //
+        // Scoping to `status = succeeded` is what keeps a crashed run out of both
+        // kept buckets (it is already counted as failed). A NULL verdict counts
+        // as kept so a succeeded-but-unverdicted row cannot slip between buckets
+        // and break the partition.
+        $kept = (clone $base)
+            ->where('status', 'succeeded')
+            ->where(function ($query): void {
+                $query->whereNull('classification')->orWhere('classification', '<>', 'disqualify');
+            });
+
+        $scoredKept = (clone $kept)->where('final_score', '>', 0)->count();
+        $noSignalKept = (clone $kept)->where('final_score', 0)->count();
+
         return [
             'total' => (int) (clone $base)->count(),
             'by_status' => $byStatus,
@@ -136,6 +158,8 @@ class ClassificationResultsService
             'scored' => (int) $scored,
             'no_signal' => (int) (clone $base)->where('final_score', 0)->count(),
             'avg_scored_score' => $avgScoredScore === null ? null : round((float) $avgScoredScore, 2),
+            'scored_kept' => (int) $scoredKept,
+            'no_signal_kept' => (int) $noSignalKept,
         ];
     }
 

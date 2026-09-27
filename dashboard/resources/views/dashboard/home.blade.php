@@ -8,12 +8,19 @@
         $byClassification = is_array($stats['by_classification'] ?? null) ? $stats['by_classification'] : [];
         $byClassificationNoSignal = is_array($stats['by_classification_no_signal'] ?? null) ? $stats['by_classification_no_signal'] : [];
         $inFlightStatuses = ['queued', 'processing', 'researching', 'scope_check', 'scoring'];
-        $succeededCount = (int) ($byStatus['succeeded'] ?? 0);
         $failedCount = (int) ($byStatus['failed'] ?? 0);
         $inFlightCount = 0;
         foreach ($inFlightStatuses as $inFlightStatus) {
             $inFlightCount += (int) ($byStatus[$inFlightStatus] ?? 0);
         }
+        // The run row is a partition, so every run lands on exactly one card and
+        // the five add up to the total. A disqualify verdict wins over the score
+        // however it was reached (scored below 30, or a gate decline), so the
+        // remaining succeeded runs split only on whether the factor produced
+        // anything: "Succeeded" is a usable score, "Failed" is no signal at all.
+        $disqualifiedCount = (int) ($byClassification['disqualify'] ?? 0);
+        $succeededCount = (int) ($stats['scored_kept'] ?? 0);
+        $noSignalFailedCount = (int) ($stats['no_signal_kept'] ?? 0);
         $refusalCount = (int) ($stats['refusals'] ?? 0);
         // A final_score of 0 means the factor found no signal, not that the lead
         // is bad, so runs are reported as scored / no-signal rather than folded
@@ -46,9 +53,9 @@
             <p class="text-sm text-slate-600">Run statistics are unavailable while the inquiry handler is unreachable.</p>
         </div>
     @else
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p class="text-sm text-slate-500">Total runs</p>
+                <p class="text-sm text-slate-500">Runs</p>
                 <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $total ?? 0 }}</p>
             </div>
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -56,8 +63,13 @@
                 <p class="mt-1 text-2xl font-semibold text-emerald-600">{{ $succeededCount }}</p>
             </div>
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p class="text-sm text-slate-500">Disqualified</p>
+                <p class="mt-1 text-2xl font-semibold text-amber-600">{{ $disqualifiedCount }}</p>
+            </div>
+            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p class="text-sm text-slate-500">Failed</p>
-                <p class="mt-1 text-2xl font-semibold text-red-600">{{ $failedCount }}</p>
+                <p class="mt-1 text-2xl font-semibold text-red-600">{{ $noSignalFailedCount }}</p>
+                <p class="mt-1 text-xs text-slate-500">no usable signal</p>
             </div>
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p class="text-sm text-slate-500">In flight</p>
