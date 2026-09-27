@@ -1,94 +1,157 @@
 # Inquiry Handler (`inquiry-handler`)
 
-API-first sales-inquiry classification service for the Sales Ops project. Its
-public interface is a JSON API: a client submits a short message plus the seven
-contact fields the inquiry form collects (`first_name`, `last_name`, `email`
-required; `phone_number`, `company_name`, `country_region` optional); the
-service classifies the inquiry against a **fixed system prompt** (the
-deployment's company/scope statement) and computes a
-**weighted multi-factor score**, maps it to one of
-`high | medium | low | disqualify`, persists the run to its scoped store, and
-replies with a visitor-facing placeholder. A minimal HTML test console is served
-at `GET /` for manual/exercise testing only — it is not a product surface. See
-`../../specs/008-inquiry-form-fields/` for the full spec, contracts, and plan.
+The triage service in the Sales Ops project. A client submits a short inquiry —
+their question plus the contact fields the form collects — and this service
+decides how well that request matches the served scope, then answers with a
+reply a visitor can be shown.
 
-## Flow
+The judgement is a **weighted multi-factor score**. Each registered factor
+scores the inquiry 0–100, the scores are combined as a weighted mean, and the
+result maps to one of `high | medium | low | disqualify`. Two gates sit in front
+of the scoring engine — web research and a scope check — and either can decline
+an inquiry outright. Every run is written to an append-only log, and every
+inquiry stays visible to a human reviewer: the classification is **guidance for
+a human, never an automated action**.
 
-1. `POST /inquiry/triage` receives the seven inquiry-form fields:
-   `{"message": "...", "first_name": "...", "last_name": "...", "email": "...",
-   "phone_number": "?", "company_name": "?", "country_region": "?"}` — the three
-   required contact fields plus `message` must be present; the rest are optional.
-2. `MessageExtractor` normalizes and validates the payload; contact fields are
-   carried along but **never sent to the AI**.
-3. RAG context retrieval is no longer used: the only context each inquiry is
-   judged against is the fixed classification system prompt
-   (`App\Triage\SystemPrompt`, with the scope hardcoded in
-   `config/services.php`). The same string is
-   persisted verbatim on the record (`system_prompt`) so admins can audit it.
-4. `ScoringEngine` iterates the code-registered `FactorRegistry`. Each factor
-   service computes a 0–100 score (factors may use `AiCallingService::complete()`
-   for AI), the received weights are read from the `factor_settings` row
-   (default 1.0 when unset), and the engine combines them via the weighted mean
-   `Σ(score·weight)/Σ(weight)`.
-5. The final score maps through `config('scoring.thresholds')` to a
-   `Classification` (`high|medium|low|disqualify`). With an empty factor catalog
-   the result is score `0.00` + `low`. Failed factors are dropped and the
-   remaining weights renormalize; a failed classification-log write never breaks
-   the 200 response.
-6. Every run is persisted to `classification_results` (append-only audit log).
-   The reply is the placeholder copy for the resulting classification.
+A test console is served at `GET /` for manual verification. It is a testing
+aid, not a product surface — see [Test console](#test-console).
 
-## Endpoints
+## API
 
-| Method | Path                   | Purpose                                             |
-| ------ | ---------------------- | --------------------------------------------------- |
-| GET    | `/`                    | Test console (form; posts JSON to `/inquiry/triage`). |
-| POST   | `/inquiry/triage`      | Run classification; weighted score + classification. |
-| GET    | `/admin/factor-settings`  | List effective weights of every registered factor (bearer-verified). |
-| PUT    | `/admin/factor-settings`  | Replace stored weights for registered factors (bearer-verified). |
-| GET    | `/health`              | Liveness probe (used by the Compose healthcheck).   |
+The JSON API is the primary interface. All three routes below authenticate with
+the shared `X-CRM-Key` credential (the `crm.key` middleware), except `/health`.
 
-Admin endpoints require `Authorization: Bearer <auth-service token>` and are
-validated against `auth-service GET /auth/verify`. See
-`../../specs/006-weighted-factor-classification/contracts/factor-settings-admin.md`.
+| Method | Path              | Purpose                                                     |
+| ------ | ----------------- | ----------------------------------------------------------- |
+| POST   | `/inquiry/triage` | Accept an inquiry, open a run row, hand it to the queue.     |
+| GET    | `/inquiry/{id}`   | Poll one run until it reaches a verdict.                      |
+| GET    | `/`               | Test console (posts to `/inquiry/triage`, then polls).        |
+| GET    | `/health`         | Liveness probe (Compose healthcheck).                         |
+
+Admin routes — `/admin/factor-settings`, `/admin/classification-results`,
+`/admin/sectors` — are bearer-token routes verified against
+`auth-service GET /auth/verify`, and are consumed by the dashboard rather than
+by clients.
 
 ### `POST /inquiry/triage`
 
-Success (`200`):
+Body: the seven form fields.
 
 ```json
 {
-  "classification": "low",
-  "score": 0,
-  "factor_scores": {},
-  "dropped_factors": [],
-  "reply": "Thank you for your inquiry. We will be in touch if there is a match.",
-  "reasoning": "No factors are registered; catalog is empty.",
-  "context": { "inquiry": { "message": "...", "name": null, "email": null } }
+  "message": "We need a B2B ordering portal for our Shopify Plus store.",
+  "first_name": "Jane",
+  "last_name": "Doe",
+  "company_name": "Northwind Distribution",
+  "email": "jane@example.com",
+  "phone_number": null,
+  "country_region": "United Kingdom"
 }
 ```
 
-Errors:
+`first_name`, `last_name`, `email`, and `message` are required; the other three
+are optional. `campaign_id` and `lead_id` may also be supplied for CRM callers
+— the run row is idempotent per that pair.
 
+Responses:
+
+- `202 {"inquiry_id": 7, "status": "queued", ...}` — accepted and queued.
+- `409 {...,"status":"existing"}` — this `(campaign_id, lead_id)` was already
+  accepted. Not re-run, no double spend; poll the same `inquiry_id`.
 - `400` — body is not a JSON object (e.g. `12345`).
 - `422` — invalid payload (blank/oversized message, malformed email, …).
-- `503` — unrecoverable upstream unavailability (defensive; normal failures
-  degrade to the `low` fallback instead of ever erroring).
+- `503` — the queue is unavailable. The service never fabricates a result.
 
 The endpoint is CSRF-exempt and bypasses `TrimStrings`/`ConvertEmptyStringsToNull`
-so payloads arrive unmutated for precise validation. The test console page is
-served normally (full CSRF applies to browser routes); the admin routes are also
-CSRF-exempt because they authenticate via bearer token, not the session.
+so payloads arrive unmutated for precise validation.
 
-## Adding a factor (`ScoreFactor`)
+### `GET /inquiry/{id}`
 
-The factor SET is code-registered only (FR-004) — the dashboard can tune weights
-for existing factors but can never add one at runtime. Adding a factor:
+The CRM poll payload. `status` moves through the pipeline and `result` stays
+`null` until the run succeeds:
+
+```
+queued → processing → researching → scope_check → scoring → succeeded
+                                                           ↘ failed
+```
+
+```json
+{
+  "inquiry_id": 7,
+  "campaign_id": "test-console",
+  "lead_id": "console-…",
+  "status": "succeeded",
+  "result": {
+    "classification": "high",
+    "score": 82.4,
+    "factor_scores": {
+      "company_size": { "score": 90, "weight": 1.0, "reasoning": "…" },
+      "industry_sector": { "score": 78, "weight": 1.5, "reasoning": "…" }
+    },
+    "dropped_factors": [],
+    "reply": "You are in the right place. Pick a time here: https://…",
+    "reasoning": "…",
+    "context": { "inquiry": {}, "system_prompt": "", "web_research": {} }
+  },
+  "error": null
+}
+```
+
+Unknown id → `404`.
+
+## Pipeline
+
+1. **Accept.** `MessageExtractor` normalises and validates the payload. The
+   contact fields are carried along but **never sent to the AI**.
+2. **Queue.** A run row is created `queued` with the payload fields only, then
+   `ProcessTriageJob` is dispatched to Redis. If the dispatch fails the row is
+   deleted rather than left promising work that will never happen.
+3. **Web research** (optional, `WEB_RESEARCH_ENABLED`). Looks the company and
+   contact up, and records what it found. A missing provider key fails this
+   stage open as `indeterminate` rather than failing the run.
+4. **Scope gate** (optional, `SCOPE_GATE_ENABLED`). Asks whether the request is
+   something the company actually does. A decline short-circuits to `succeeded`
+   with a `disqualify` envelope and a refusal — it never reaches scoring.
+5. **Scoring.** `ScoringEngine` walks the code-registered `FactorRegistry`. Each
+   factor returns a 0–100 `FactorVerdict`; weights come from the
+   `factor_settings` row (default `1.0`), and the engine combines them as
+   `Σ(score·weight) / Σ(weight)`. The result maps through
+   `config('scoring.thresholds')` to a `Classification`, and lands in the log
+   exactly once.
+6. **Reply.** A per-classification placeholder from `config('scoring.replies')`.
+   The `high` reply has `{booking_url}` substituted only when
+   `BOOKING_URL` is a valid URL.
+
+### Failure handling
+
+Classification completes even when things go wrong:
+
+- A factor that throws is **dropped**; the remaining weights renormalize and the
+  drop is recorded in `dropped_factors`.
+- An unreadable weights store falls back to the configured defaults.
+- A failed log write is logged but never blocks the response.
+- With an empty factor catalog the result is score `0.00` and `low` — never
+  `disqualify`.
+- An unrecoverable run lands `failed` with `error` set, and stops spending.
+
+## Factors
+
+The factor **set** is code-registered only. The dashboard can tune weights for
+existing factors but can never add one at runtime.
+
+Registered today:
+
+| Factor             | What it scores                                     |
+| ------------------ | -------------------------------------------------- |
+| `company_size`     | Whether the prospect's headcount suits the engagement. |
+| `industry_sector`  | Whether the inquiry's sector is one the company serves. |
+
+To add one:
 
 1. **Write a service** implementing `App\Scoring\ScoreFactor`:
 
    ```php
-   namespace App\Scoring; // or your own namespace
+   namespace App\Scoring;
 
    final class ScopeRelevanceFactor implements ScoreFactor
    {
@@ -112,58 +175,77 @@ for existing factors but can never add one at runtime. Adding a factor:
    $this->app->singleton(FactorRegistry::class, fn ($app) => (new FactorRegistry)->add(new ScopeRelevanceFactor));
    ```
 
-3. **Tune its weight** (optional) from the dashboard "Factor weights" tab, or via
-   `PUT /admin/factor-settings` with `{"weights": {"scope_relevance": 0.5}}`.
-   Unknown names are rejected with `422`.
+3. **Tune its weight** from the dashboard, or via `PUT /admin/factor-settings`
+   with `{"weights": {"scope_relevance": 0.5}}`. Unknown names are rejected
+   with `422`.
 
-That's it — the engine, triage flow, admin API, and dashboard pick the factor up
-automatically (SC-003).
+The engine, the log, and the dashboard pick it up from there.
+
+## Test console
+
+`GET /` is a manual-testing aid served by this app. It presents the same
+inquiry form a client would fill in, submits it to `POST /inquiry/triage`, then
+polls `GET /inquiry/{id}` until the run resolves and renders:
+
+- the pipeline as a plain-language checklist, so a slow run reads as progress
+  rather than a spinner;
+- the **visitor-facing reply** — the same text a client would be shown, with the
+  booking link promoted to a real button on a `high` verdict;
+- a collapsed **operator panel** with the run id, elapsed time, classification,
+  score, per-factor scores and weights, dropped factors, reasoning, and the raw
+  poll JSON.
+
+Three sample requests are pre-filled as chips (in scope, borderline, out of
+scope) to make exercising the pipeline quick.
+
+The page is labelled a test console at the top so its role is never ambiguous.
+It reads the `X-CRM-Key` from server-side config instead of asking the tester to
+paste it, and is never rendered for an unauthenticated caller of the API.
 
 ## Configuration
 
-All knobs are env-driven (see `.env.example`):
+All knobs are env-driven (see `.env.example`).
 
-| Env var                        | Meaning                                              |
-| ------------------------------ | ---------------------------------------------------- |
-| `AUTH_API_URL`                 | `auth-service` base URL (e.g. `http://auth-service:8001`). |
-| `RAG_API_URL`                  | `work-scope-rag` base URL (`http://work-scope-rag:8000`). Retained (unused) for future re-enabling of context retrieval. |
-| `DB_*`                         | Scoped store (`inquiry_handler`) for weights + classification log. |
-| `SERVICE_USERNAME`             | Service account for the RAG bearer token.            |
-| `SERVICE_PASSWORD`             | Service account password. Never commit a real value. |
-| `AI_API_KEY`                   | Groq API key. Never commit a real value.             |
-| `AI_API_URL`                   | AI chat-completions endpoint (default Groq, OpenAI-compatible). |
-| `AI_MODEL`                     | Default (scope/general) AI model id (default `openai/gpt-oss-120b`). |
-| `AI_RESEARCH_MODEL`            | Model id for the research agent's layer-1 notes + final extraction (default `openai/gpt-oss-120b`). |
-| `AI_FILTER_MODEL`              | Model id for the research candidate filter (default `openai/gpt-oss-120b`). |
-| `AI_CONCURRENCY`               | Max in-flight AI requests when a step fans out, e.g. layer-1 notes batches (default 2). |
-| `AI_MAX_OUTPUT_TOKENS`         | Cap on generated tokens per AI call (default 2048).  |
-| `AI_TIMEOUT`                   | Per-request AI HTTP timeout in seconds (default 90).   |
-| `AI_GUARD_ENABLED`             | Shared RPM + in-flight + token-per-minute budget across all workers (default `true`). |
-| `AI_MAX_PER_MIN`               | Shared RPM cap (default 150; a sanity bound, not a wall — see `.env.example`). |
-| `AI_MAX_INFLIGHT`              | Shared in-flight cap across workers (default 4).     |
-| `AI_MAX_TOKENS_PER_MIN`        | Estimated shared token-per-minute budget (default 7000; charged before each call as input chars/4 + output cap so concurrent batches pace to the provider's TPM window instead of blowing it in one wave — keep it just under the provider cap). |
-| `AI_GUARD_WAIT_SECONDS`        | How long a deferred job waits for a freed guard slot before failing open (default 90; keep it under `WEB_RESEARCH_STEP_TIMEOUT`). |
-| `WEB_RESEARCH_MAX_CANDIDATES`   | Candidate results the agent considers before the AI filter (default 40, i.e. everything the provider returns). |
-| `WEB_RESEARCH_MAX_SOURCES`      | Kept sources the agent fetches and cites (default 40). |
-| `WEB_RESEARCH_FETCH_TIMEOUT`    | Per-page fetch timeout in seconds (default 8).        |
-| `WEB_RESEARCH_FETCH_CONCURRENCY`| Simultaneous page downloads per batch (default 10).   |
-| `WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS` | Documents that fit in a single AI call go straight to one final extraction; larger sets go through layer-1 per-page notes and the final extraction then runs once PER chunk of notes, with the parts merged so nothing is dropped (default 8000, sized so one realistic prose batch stays under Groq's 8K token/min free tier). Layer-1 batches run concurrently up to `AI_CONCURRENCY`, and transient 413 (token-per-minute) / 429 / 5xx responses are retried with backoff. |
-| `WEB_RESEARCH_STEP_TIMEOUT`     | Wall-clock budget for one research agent run (default 90). |
-| `WEB_RESEARCH_FILTER_ATTEMPTS`  | AI filter retries on unparseable output (default 2). |
-| `WEB_RESEARCH_NOTE_ATTEMPTS`    | Layer-1 per-page notes retries on unparseable output (default 2). |
-| `WEB_RESEARCH_NOTE_MAX_OUTPUT_TOKENS` | Layer-1 notes output cap and per-note text bound (default 1024; keeps input + output of every notes call inside the 8K token/min window while notes EXTRACT the pages' detail verbatim). |
-| `WEB_RESEARCH_RESCUE_ON_NAME_MATCH` | Best-effort rescue for scarce data: fetch + summarize name-matching candidates and mark the result `uncertain` (default `true`). |
-| `COMPANY_SCOPE`                | Removed — scope is now hardcoded in `config/services.php` (`company_scope`). |
-| `BOOKING_URL`                  | Booking link substituted into the `high` reply only when it is a valid URL. |
-| `MESSAGE_MAX_LENGTH`           | Max message length (default 4000).                   |
-| `RAG_TOP_K`                    | Unused since context retrieval is disabled (kept for future use; default 5). |
+| Env var | Meaning |
+| ------- | ------- |
+| `AUTH_API_URL` | `auth-service` base URL. |
+| `RAG_API_URL` | `work-scope-rag` base URL. Retained (currently unused) for re-enabling context retrieval. |
+| `DB_*` | Scoped store (`inquiry_handler`) for weights, sector settings, and the classification log. |
+| `CRM_API_KEY` | Shared credential the CRM presents as `X-CRM-Key`. Empty tight-shuts the inquiry surface. |
+| `SERVICE_USERNAME` / `SERVICE_PASSWORD` | Service account for the bearer token. |
+| `AI_API_KEY` / `AI_API_URL` | AI chat-completions provider (OpenAI-compatible; default Groq). |
+| `AI_MODEL` | Model for scope checks and non-research calls. |
+| `AI_RESEARCH_MODEL` | Model for the research agent's notes and final extraction. |
+| `AI_FILTER_MODEL` | Model for the research candidate filter (cheap and fast by design). |
+| `AI_CONCURRENCY` | Max in-flight AI requests when a step fans out (default 2). |
+| `AI_MAX_OUTPUT_TOKENS` | Cap on generated tokens per call (default 2048). |
+| `AI_TIMEOUT` | Per-request AI HTTP timeout in seconds (default 90). |
+| `AI_GUARD_*` | Shared RPM, in-flight, and token-per-minute budget across all workers. Keep the token budget just under the provider's cap. |
+| `AI_GUARD_WAIT_SECONDS` | How long a deferred job waits for a guard slot before failing open. |
+| `TAVILY_API_KEY` | Web-research search provider. Missing key fails the step open as `indeterminate`. |
+| `WEB_RESEARCH_ENABLED` | Whether the research stage runs. |
+| `WEB_RESEARCH_MAX_CANDIDATES` / `_MAX_SOURCES` | Candidates considered before the AI filter, and sources kept and cited. |
+| `WEB_RESEARCH_SUMMARY_MAX_INPUT_CHARS` | Below this, documents go through one final extraction; above it they go through layer-1 per-page notes, whose parts are merged so nothing is dropped. |
+| `WEB_RESEARCH_FETCH_TIMEOUT` / `_FETCH_CONCURRENCY` | Per-page fetch timeout and simultaneous downloads per batch. |
+| `WEB_RESEARCH_STEP_TIMEOUT` | Wall-clock budget for one research run. |
+| `WEB_RESEARCH_FILTER_ATTEMPTS` / `_NOTE_ATTEMPTS` | Retries on unparseable AI output. |
+| `WEB_RESEARCH_RESCUE_ON_NAME_MATCH` | Best-effort rescue for scarce data; marks the result `uncertain`. |
+| `SCOPE_GATE_ENABLED` | Whether the scope gate runs. |
+| `BOOKING_URL` | Booking link substituted into the `high` reply only when it is a valid URL. |
+| `MESSAGE_MAX_LENGTH` | Max message length (default 4000). |
 | `SCORING_THRESHOLD_HIGH/MEDIUM/LOW`, `SCORING_DEFAULT_FACTOR_WEIGHT`, `SCORING_SCORE_MIN/MAX` | Scoring tunables (defaults in `config/scoring.php`). |
+| `QUEUE_CONNECTION`, `REDIS_*` | Queue transport for `ProcessTriageJob`. |
+
+Scope itself is not env-driven: it is a fixed statement hardcoded in
+`config/services.php` (`company_scope`) so the triage persona cannot be
+influenced by a request.
 
 ## Run & test
 
-The Compose stack runs the handler at `http://localhost:8003` (healthcheck hits
-`GET /health`; depends on `db`, `auth-service`, and `work-scope-rag` being
-healthy). Migrations run automatically from the entrypoint.
+The handler is served at `http://localhost:8003` and depends on `db`,
+`auth-service`, and `work-scope-rag` being healthy. Migrations run from the
+entrypoint. The pipeline itself runs on the `inquiry-worker` container, not in
+the web process.
 
 ```sh
 docker compose up --build -d
@@ -171,19 +253,31 @@ composer install        # local dev
 php artisan test        # full suite must stay green (uses SQLite :memory:)
 ```
 
+Scale the workers with:
+
+```sh
+docker compose up -d --scale inquiry-worker=3
+```
+
 ## Design notes
 
-- **Scoped store**: only this service holds `DB_*`; factor weights and the
-  classification log live in the `inquiry_handler` database. Tests run on SQLite
-  `:memory:` and never touch it (research R9).
-- **Classification completes even on failures** (FR-007/FR-008): failed factors
-  drop with renormalization, an unreadable weights store falls back to defaults,
-  and a failed log write is logged but never blocks the response.
-- **Advisory-only classification** (constitution principle III): every inquiry
-  remains visible to a human reviewer; `high/medium/low/disqualify` is guidance,
-  not an action.
-- **Superseded triage classes are kept**: `App\Triage\*` and
+- **Scoped store.** Only this service holds `DB_*`; factor weights, sector
+  settings, and the classification log live in the `inquiry_handler` database.
+  Tests run on SQLite `:memory:` and never touch it.
+- **The log is append-only.** Result fields are written exactly once, at
+  completion; stages write only their own columns before that. Every inquiry
+  therefore remains auditable after the fact.
+- **Advisory only.** Every inquiry stays visible to a human reviewer.
+  `high/medium/low/disqualify` is guidance, not an action — nothing is
+  auto-answered to a customer and no lead is dropped on a score.
+- **Idempotent intake.** The unique `(campaign_id, lead_id)` index means a
+  retried submission re-acknowledges the existing run instead of re-running it
+  and double-spending the AI budget.
+- **Crash-recovery ladder.** redis `retry_after` (900) > worker `--timeout`
+  (600) > job `$timeout` (590). Raising any research or AI budget means raising
+  all three in concert — never only one.
+- **Superseded triage classes are kept.** `App\Triage\*` and
   `AiCallingService::triage()` are marked `@deprecated`, retained for reference,
-  and never invoked by the new flow (FR-012).
-- **No frontend build step**: the test console page is a single Blade view with
-  inline CSS; no Node/Vite toolchain.
+  and never invoked by the current flow.
+- **No frontend build step.** The console is a single Blade view with inline
+  CSS; no Node/Vite toolchain.

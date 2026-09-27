@@ -137,13 +137,10 @@
 
             <x-date-range :range="$range" />
 
-            {{-- Applying a filter always restarts at page 1: page 7 of a set that
-                 now holds two pages is an empty table, not the last page. Every
-                 control submits itself on change, so this button only matters
-                 without JavaScript. --}}
-            <button type="submit" class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500">
-                Apply filters
-            </button>
+            {{-- Every control above auto-submits on change, so there is no
+                 apply button, matching the dashboard home page. Applying a
+                 filter always restarts at page 1: page 7 of a set that now
+                 holds two pages is an empty table, not the last page. --}}
 
             @if ($filterQuery !== [])
                 <a href="{{ route('classification.index') }}" class="py-2 text-sm font-medium text-slate-500 hover:text-slate-700">
