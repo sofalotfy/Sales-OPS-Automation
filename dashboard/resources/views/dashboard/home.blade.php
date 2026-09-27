@@ -27,6 +27,13 @@
         $noSignalCount = (int) ($stats['no_signal'] ?? 0);
         $avgScoredScore = $stats['avg_scored_score'] ?? null;
         $scoredShare = ($total ?? 0) > 0 ? (int) round($scoredCount / $total * 100) : 0;
+        // With the factor catalog populated, Classification::forScore() maps 0 to
+        // disqualify, so a `low` verdict can no longer arrive with a zero score;
+        // the only rows that manage it are the legacy empty-catalog ones. Do not
+        // annotate them, or the mix implies the pipeline still produces a
+        // combination it cannot. `disqualify` keeps its note, because a gate
+        // decline still forces final_score = 0 on that verdict.
+        $zeroSignalNoteWithheld = ['low'];
     @endphp
 
     <div class="mb-6 flex items-center justify-between">
@@ -110,7 +117,7 @@
                                     <x-classification-badge :classification="$classification" />
                                     <span class="text-sm text-slate-600">
                                         {{ $count }} &middot; {{ (int) round($count / $classifiedTotal * 100) }}%
-                                        @if ($verdictNoSignal > 0)
+                                        @if ($verdictNoSignal > 0 && ! in_array($classification, $zeroSignalNoteWithheld, true))
                                             <span class="text-slate-400">&middot; {{ $verdictNoSignal }} scored 0</span>
                                         @endif
                                     </span>

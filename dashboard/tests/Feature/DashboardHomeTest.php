@@ -79,9 +79,14 @@ class DashboardHomeTest extends TestCase
             ->assertDontSee('<p class="text-sm text-slate-500">Classified</p>', false)
             ->assertSee('Classification mix')
             // The mix must show which verdicts are the zero-score ones, or it
-            // reads as contradicting the "103 scored 0" card above it.
+            // reads as contradicting the "103 scored 0" card above it. Only
+            // `disqualify` is annotated, since a gate decline still forces a
+            // zero score onto that verdict.
             ->assertSee('55 scored 0')
-            ->assertSee('48 scored 0')
+            // `low` can no longer arrive scoring 0 now that the catalog maps 0 to
+            // disqualify, so its 48 zero-score rows are legacy only and the mix
+            // must not imply the pipeline still produces them.
+            ->assertDontSee('48 scored 0')
             // `high` has no zero-score siblings, so it must not claim any.
             ->assertDontSee('7 scored 0')
             ->assertSee('Recent runs');
