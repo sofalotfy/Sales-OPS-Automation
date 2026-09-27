@@ -70,7 +70,13 @@ class DashboardHomeTest extends TestCase
             // headline score silently hides the runs it excludes.
             ->assertSee('103 scored 0')
             ->assertSee('Excludes 103 zero-signal runs')
-            ->assertSee('Refusals')
+            // The Refusals and Classified widgets were dropped: both duplicated
+            // the run row above (a decline is already counted as Disqualified,
+            // and a classified run is already counted as Runs). Pinning the card
+            // label markup keeps these from being satisfied by "Classification
+            // mix" or any other sentence on the page.
+            ->assertDontSee('<p class="text-sm text-slate-500">Refusals</p>', false)
+            ->assertDontSee('<p class="text-sm text-slate-500">Classified</p>', false)
             ->assertSee('Classification mix')
             // The mix must show which verdicts are the zero-score ones, or it
             // reads as contradicting the "103 scored 0" card above it.

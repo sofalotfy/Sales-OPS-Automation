@@ -21,7 +21,6 @@
         $disqualifiedCount = (int) ($byClassification['disqualify'] ?? 0);
         $succeededCount = (int) ($stats['scored_kept'] ?? 0);
         $noSignalFailedCount = (int) ($stats['no_signal_kept'] ?? 0);
-        $refusalCount = (int) ($stats['refusals'] ?? 0);
         // A final_score of 0 means the factor found no signal, not that the lead
         // is bad, so runs are reported as scored / no-signal rather than folded
         // into a single average that reads like lead quality.
@@ -77,7 +76,7 @@
             </div>
         </div>
 
-        <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="mt-4 grid gap-4 sm:grid-cols-2">
             <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p class="text-sm text-slate-500">Usable signal</p>
                 <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $scoredCount }}</p>
@@ -98,14 +97,6 @@
                         Across every scored run
                     @endif
                 </p>
-            </div>
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p class="text-sm text-slate-500">Refusals</p>
-                <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $refusalCount }}</p>
-            </div>
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p class="text-sm text-slate-500">Classified</p>
-                <p class="mt-1 text-2xl font-semibold text-slate-900">{{ array_sum($byClassification) }}</p>
             </div>
         </div>
 
