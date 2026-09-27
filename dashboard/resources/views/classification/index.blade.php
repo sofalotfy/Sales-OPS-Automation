@@ -81,9 +81,56 @@
         <div class="mb-3 flex items-center justify-between">
             <h2 class="text-base font-semibold text-slate-900">Recent classifications</h2>
             @if ($total > 0)
-                <span class="text-sm text-slate-500">{{ $total }} total</span>
+                <span class="text-sm text-slate-500">{{ $total }} {{ ($statusFilter || $classificationFilter) ? 'matching' : 'total' }}</span>
             @endif
         </div>
+
+        @php($filterQuery = array_filter([
+            'status' => $statusFilter,
+            'classification' => $classificationFilter,
+        ], fn ($value): bool => $value !== null))
+
+        <form method="GET" action="{{ route('classification.index') }}" class="mb-4 flex flex-wrap items-end gap-3">
+            <div>
+                <label for="filter-status" class="mb-1 block text-xs font-medium text-slate-500">Status</label>
+                <select
+                    id="filter-status"
+                    name="status"
+                    class="block rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-sky-500"
+                >
+                    <option value="">All statuses</option>
+                    @foreach ($statuses as $statusOption)
+                        <option value="{{ $statusOption }}" @selected($statusFilter === $statusOption)>{{ ucfirst(str_replace('_', ' ', $statusOption)) }}</option>
+                    @endforeach
+                </select>
+            </div>
+
+            <div>
+                <label for="filter-classification" class="mb-1 block text-xs font-medium text-slate-500">Classification</label>
+                <select
+                    id="filter-classification"
+                    name="classification"
+                    class="block rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-sky-500"
+                >
+                    <option value="">All classifications</option>
+                    @foreach ($classifications as $classificationOption)
+                        <option value="{{ $classificationOption }}" @selected($classificationFilter === $classificationOption)>{{ ucfirst($classificationOption) }}</option>
+                    @endforeach
+                </select>
+            </div>
+
+            {{-- Applying a filter always restarts at page 1: page 7 of a set that
+                 now holds two pages is an empty table, not the last page. --}}
+            <button type="submit" class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500">
+                Apply filters
+            </button>
+
+            @if ($filterQuery !== [])
+                <a href="{{ route('classification.index') }}" class="py-2 text-sm font-medium text-slate-500 hover:text-slate-700">
+                    Clear
+                </a>
+            @endif
+        </form>
 
         <x-upstream-error message="{{ $resultsError }}" />
 
@@ -91,7 +138,9 @@
             <p class="text-sm text-slate-500">The classification log is unavailable while the inquiry handler is unreachable.</p>
         @elseif (empty($results))
             <div class="rounded-lg border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
-                <p class="text-sm text-slate-600">No inquiries classified yet.</p>
+                <p class="text-sm text-slate-600">
+                    {{ $filterQuery === [] ? 'No inquiries classified yet.' : 'No runs match these filters.' }}
+                </p>
             </div>
         @else
             <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -138,10 +187,10 @@
                     <span class="text-slate-500">Page {{ $page }} of {{ $pageCount }}</span>
                     <div class="flex gap-3">
                         @if ($page > 1)
-                            <a href="{{ route('classification.index', ['page' => $page - 1]) }}" class="font-medium text-sky-600 hover:text-sky-500">&larr; Previous</a>
+                            <a href="{{ route('classification.index', $filterQuery + ['page' => $page - 1]) }}" class="font-medium text-sky-600 hover:text-sky-500">&larr; Previous</a>
                         @endif
                         @if ($page < $pageCount)
-                            <a href="{{ route('classification.index', ['page' => $page + 1]) }}" class="font-medium text-sky-600 hover:text-sky-500">Next &rarr;</a>
+                            <a href="{{ route('classification.index', $filterQuery + ['page' => $page + 1]) }}" class="font-medium text-sky-600 hover:text-sky-500">Next &rarr;</a>
                         @endif
                     </div>
                 </div>

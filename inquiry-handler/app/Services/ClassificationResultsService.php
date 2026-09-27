@@ -25,15 +25,37 @@ class ClassificationResultsService
      * Newest-first page of summary rows (big `retrieved_context` /
      * `factor_scores` are intentionally omitted; the detail endpoint ships them).
      *
+     * `status` and `classification` are optional exact-match filters; null (or an
+     * empty string) means unfiltered. `total` counts the filtered set, not the
+     * whole log, so a caller paginating a filtered view cannot walk off the end
+     * of a page it is not actually reading.
+     *
      * @return array{items: array<int, array<string, mixed>>, total: int, limit: int, offset: int}
      *
      * @throws Throwable when the scoped store is unreadable
      */
-    public function list(int $limit, int $offset): array
-    {
-        $total = ClassificationResult::count();
+    public function list(
+        int $limit,
+        int $offset,
+        ?string $status = null,
+        ?string $classification = null,
+    ): array {
+        $status = ($status === null || $status === '') ? null : $status;
+        $classification = ($classification === null || $classification === '') ? null : $classification;
 
-        $items = ClassificationResult::query()
+        $query = ClassificationResult::query();
+
+        if ($status !== null) {
+            $query->where('status', $status);
+        }
+
+        if ($classification !== null) {
+            $query->where('classification', $classification);
+        }
+
+        $total = (clone $query)->count();
+
+        $items = $query
             ->orderByDesc('id')
             ->limit($limit)
             ->offset($offset)

@@ -56,7 +56,143 @@ class ClassificationTest extends TestCase
             ->assertSee('2 total');
     }
 
-    public function test_index_empty_state(): void
+    /**
+     * Query parameters of the classification-list request the page actually sent.
+     *
+     * The client stamps the full URI (query string included) onto the request, so
+     * an exact URL match never holds for a filtered call and the query is parsed
+     * out of it instead.
+     *
+     * @return array<string, string>
+     */
+    private function sentListQuery(): array
+    {
+        $captured = [];
+
+        Http::assertSent(function ($request) use (&$captured): bool {
+            if (! str_starts_with($request->url(), UpstreamStubs::inquiryUrl('/admin/classification-results'))) {
+                return false;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $captured);
+
+            return true;
+        });
+
+        return $captured;
+    }
+
+    public function test_index_forwards_filters_to_the_inquiry_handler(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 2, classification: 'low')],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index', ['status' => 'succeeded', 'classification' => 'low']))
+            ->assertOk()
+            ->assertSee('1 matching')
+            ->assertSee('Low');
+
+        // The rows shown must be the filtered set, so the filter has to reach the
+        // handler rather than be applied to the page already fetched.
+        $query = $this->sentListQuery();
+        $this->assertSame('succeeded', $query['status'] ?? null);
+        $this->assertSame('low', $query['classification'] ?? null);
+    }
+
+    public function test_index_omits_absent_filters_from_the_upstream_query(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1)],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index'))->assertOk();
+
+        // An empty filter is omitted entirely; sending `status=` would reach the
+        // handler as a value it has to interpret rather than ignore.
+        $query = $this->sentListQuery();
+        $this->assertArrayNotHasKey('status', $query);
+        $this->assertArrayNotHasKey('classification', $query);
+    }
+
+    public function test_index_drops_a_filter_value_the_log_cannot_match(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1)],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        // Forwarded verbatim this would come back 422 and blank the whole log.
+        $this->get(route('classification.index', ['status' => 'nonsense']))
+            ->assertOk()
+            ->assertSee('Recent classifications');
+
+        $this->assertArrayNotHasKey('status', $this->sentListQuery());
+    }
+
+    public function test_index_keeps_the_active_filter_selected_and_offers_a_clear_link(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1, classification: 'disqualify')],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index', ['status' => 'failed']))
+            ->assertOk()
+            // Reloading the page must show the filter still applied, not a form
+            // that has silently reset to "All statuses".
+            ->assertSee('<option value="failed" selected>', false)
+            ->assertSee('<option value="succeeded" >', false)
+            ->assertSee('Clear');
+    }
+
+    public function test_index_pagination_links_carry_the_active_filters(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1)],
+                'total' => 45,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        // Dropping the filter on page 2 would silently widen the result set the
+        // reader is paging through.
+        $this->get(route('classification.index', ['status' => 'succeeded']))
+            ->assertOk()
+            ->assertSee('status=succeeded&amp;page=2', false);
+    }
+
+    public function test_index_reports_a_filtered_empty_state_distinctly(): void
     {
         $this->signIn();
         $this->stubIndex(
@@ -64,10 +200,12 @@ class ClassificationTest extends TestCase
             fn () => Http::response(['items' => [], 'total' => 0, 'limit' => 20, 'offset' => 0], 200),
         );
 
-        $this->get(route('classification.index'))
+        // "No inquiries classified yet" would be a lie: the log has rows, this
+        // filter just excludes them all.
+        $this->get(route('classification.index', ['classification' => 'high']))
             ->assertOk()
-            ->assertSee('No factors are registered')
-            ->assertSee('No inquiries classified yet');
+            ->assertSee('No runs match these filters')
+            ->assertDontSee('No inquiries classified yet');
     }
 
     public function test_index_renders_in_flight_runs_with_neutral_badge_and_placeholder(): void

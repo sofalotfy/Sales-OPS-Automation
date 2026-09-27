@@ -43,10 +43,31 @@ class InquiryHandlerApiClient
      * @param  int  $limit  clamped to 1–50 upstream
      * @param  int  $offset  0-based
      */
-    public function getClassificationResults(int $limit = 20, int $offset = 0): Response
-    {
+    /**
+     * One page of the classification log.
+     *
+     * `status` and `classification` are optional exact-match filters; a null
+     * value is omitted from the query string entirely so the upstream treats it
+     * as unfiltered rather than as an empty match.
+     */
+    public function getClassificationResults(
+        int $limit = 20,
+        int $offset = 0,
+        ?string $status = null,
+        ?string $classification = null,
+    ): Response {
+        $query = ['limit' => $limit, 'offset' => $offset];
+
+        if ($status !== null && $status !== '') {
+            $query['status'] = $status;
+        }
+
+        if ($classification !== null && $classification !== '') {
+            $query['classification'] = $classification;
+        }
+
         return $this->authenticatedRequest()
-            ->get('/admin/classification-results', ['limit' => $limit, 'offset' => $offset]);
+            ->get('/admin/classification-results', $query);
     }
 
     /** Full payload of a single classification run (contracts/classification-reporting.md). */

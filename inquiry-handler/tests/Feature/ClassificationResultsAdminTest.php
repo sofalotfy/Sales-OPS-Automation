@@ -160,6 +160,102 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('items.1.id', 2);
     }
 
+    public function test_index_filters_by_status_and_reports_the_filtered_total(): void
+    {
+        Stubs::authVerifyOk();
+
+        foreach ([['succeeded', 'high'], ['succeeded', 'low'], ['failed', null], ['queued', null]] as [$status, $verdict]) {
+            $run = $this->seedRun();
+            $run->update([
+                'status' => $status,
+                'classification' => $verdict,
+                'final_score' => $verdict === null ? null : 50.0,
+            ]);
+        }
+
+        $this->getJson('/admin/classification-results?status=succeeded', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            // `total` counts the filtered set, not the whole log, so a paginated
+            // filtered view cannot walk off the end of pages it never reads.
+            ->assertJsonPath('total', 2)
+            ->assertJsonCount(2, 'items')
+            ->assertJsonPath('items.0.status', 'succeeded')
+            ->assertJsonPath('items.1.status', 'succeeded');
+
+        $this->getJson('/admin/classification-results?status=failed', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.status', 'failed');
+    }
+
+    public function test_index_filters_by_classification(): void
+    {
+        Stubs::authVerifyOk();
+
+        foreach (['high', 'low', 'low', 'disqualify'] as $verdict) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'classification' => $verdict, 'final_score' => 50.0]);
+        }
+
+        $this->getJson('/admin/classification-results?classification=low', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonCount(2, 'items')
+            ->assertJsonPath('items.0.classification', 'low')
+            ->assertJsonPath('items.1.classification', 'low');
+    }
+
+    public function test_index_combines_both_filters(): void
+    {
+        Stubs::authVerifyOk();
+
+        // matches the classification filter but not the status filter
+        $run = $this->seedRun();
+        $run->update(['status' => 'failed', 'classification' => 'low', 'final_score' => 50.0]);
+
+        // matches the status filter but not the classification filter
+        $run = $this->seedRun();
+        $run->update(['status' => 'succeeded', 'classification' => 'high', 'final_score' => 80.0]);
+
+        // matches both
+        $run = $this->seedRun();
+        $run->update(['status' => 'succeeded', 'classification' => 'low', 'final_score' => 45.0]);
+
+        $this->getJson('/admin/classification-results?status=succeeded&classification=low', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonCount(1, 'items')
+            ->assertJsonPath('items.0.status', 'succeeded')
+            ->assertJsonPath('items.0.classification', 'low');
+    }
+
+    public function test_index_treats_blank_filters_as_unfiltered(): void
+    {
+        Stubs::authVerifyOk();
+        $run = $this->seedRun();
+        $run->update(['status' => 'succeeded', 'classification' => 'low']);
+
+        $this->getJson('/admin/classification-results?status=&classification=', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.id', $run->id);
+    }
+
+    public function test_index_rejects_a_filter_value_outside_the_enum(): void
+    {
+        Stubs::authVerifyOk();
+        $this->seedRun();
+
+        // Returning the unfiltered log instead would hide the caller bug.
+        $this->getJson('/admin/classification-results?status=nonsense', ['Authorization' => 'Bearer token'])
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'Unsupported filter value.');
+
+        $this->getJson('/admin/classification-results?classification=nonsense', ['Authorization' => 'Bearer token'])
+            ->assertStatus(422)
+            ->assertJsonPath('detail', 'Unsupported filter value.');
+    }
+
     public function test_index_clamps_limit_to_50(): void
     {
         Stubs::authVerifyOk();

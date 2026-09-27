@@ -27,10 +27,24 @@ class ClassificationController extends Controller
 
     private const LOG_UNAVAILABLE = 'The classification log is unavailable. Please try again.';
 
-    public function index(): View|RedirectResponse
+    /** @var list<string> */
+    private const STATUSES = [
+        'queued', 'processing', 'researching', 'scope_check', 'scoring', 'succeeded', 'failed',
+    ];
+
+    /** @var list<string> */
+    private const CLASSIFICATIONS = ['high', 'medium', 'low', 'disqualify'];
+
+    public function index(Request $request): View|RedirectResponse
     {
-        $page = max(1, (int) request()->integer('page', 1));
+        $page = max(1, (int) $request->integer('page', 1));
         $offset = ($page - 1) * self::PAGE_SIZE;
+
+        // The filter is applied upstream, not to the page already fetched, so the
+        // count and the rows describe the same set. An unrecognised value drops
+        // the filter instead of reaching the handler, which answers 422.
+        $status = $this->clean($request->query('status'), self::STATUSES);
+        $classification = $this->clean($request->query('classification'), self::CLASSIFICATIONS);
 
         $client = app(InquiryHandlerApiClient::class);
 
@@ -50,7 +64,9 @@ class ClassificationController extends Controller
         $results = [];
         $resultsError = null;
         $total = 0;
-        $resultsResponse = $this->call(fn () => $client->getClassificationResults(self::PAGE_SIZE, $offset));
+        $resultsResponse = $this->call(
+            fn () => $client->getClassificationResults(self::PAGE_SIZE, $offset, $status, $classification),
+        );
         if ($resultsResponse === null) {
             $resultsError = self::LOG_UNAVAILABLE;
         } elseif ($resultsResponse->status() === 401) {
@@ -70,7 +86,21 @@ class ClassificationController extends Controller
             'total' => $total,
             'page' => $page,
             'pageCount' => max(1, (int) ceil($total / self::PAGE_SIZE)),
+            'statusFilter' => $status,
+            'classificationFilter' => $classification,
+            'statuses' => self::STATUSES,
+            'classifications' => self::CLASSIFICATIONS,
         ]);
+    }
+
+    /**
+     * Keeps a submitted filter only when it is one the log can actually match.
+     *
+     * @param  list<string>  $allowed
+     */
+    private function clean(mixed $value, array $allowed): ?string
+    {
+        return is_string($value) && in_array($value, $allowed, true) ? $value : null;
     }
 
     /** Full classification run detail (contracts/classification-reporting.md). */
