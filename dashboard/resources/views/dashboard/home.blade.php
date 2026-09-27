@@ -6,6 +6,7 @@
     @php
         $byStatus = is_array($stats['by_status'] ?? null) ? $stats['by_status'] : [];
         $byClassification = is_array($stats['by_classification'] ?? null) ? $stats['by_classification'] : [];
+        $byClassificationNoSignal = is_array($stats['by_classification_no_signal'] ?? null) ? $stats['by_classification_no_signal'] : [];
         $inFlightStatuses = ['queued', 'processing', 'researching', 'scope_check', 'scoring'];
         $succeededCount = (int) ($byStatus['succeeded'] ?? 0);
         $failedCount = (int) ($byStatus['failed'] ?? 0);
@@ -106,10 +107,16 @@
                     @php($classifiedTotal = max(1, array_sum($byClassification)))
                     <ul class="mt-4 space-y-3">
                         @foreach ($byClassification as $classification => $count)
+                            @php($verdictNoSignal = (int) ($byClassificationNoSignal[$classification] ?? 0))
                             <li>
                                 <div class="flex items-center justify-between gap-3">
                                     <x-classification-badge :classification="$classification" />
-                                    <span class="text-sm text-slate-600">{{ $count }} · {{ (int) round($count / $classifiedTotal * 100) }}%</span>
+                                    <span class="text-sm text-slate-600">
+                                        {{ $count }} &middot; {{ (int) round($count / $classifiedTotal * 100) }}%
+                                        @if ($verdictNoSignal > 0)
+                                            <span class="text-slate-400">&middot; {{ $verdictNoSignal }} scored 0</span>
+                                        @endif
+                                    </span>
                                 </div>
                                 <div class="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
                                     <div class="h-full rounded-full bg-sky-500" style="width: {{ max(2, (int) round($count / $classifiedTotal * 100)) }}%"></div>

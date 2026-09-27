@@ -237,6 +237,44 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('avg_scored_score', 72);
     }
 
+    public function test_stats_reports_zero_scores_per_verdict(): void
+    {
+        Stubs::authVerifyOk();
+
+        // 55 zero-score disqualifies, mirroring the live split where gate
+        // declines score 0 by construction.
+        foreach (range(1, 2) as $ignored) {
+            $run = $this->seedRun();
+            $run->update(['status' => 'succeeded', 'final_score' => 0.0, 'classification' => 'disqualify']);
+        }
+
+        // 48 zero-score lows, mirroring the empty-catalog era where 0 mapped to
+        // low rather than disqualify.
+        $low = $this->seedRun();
+        $low->update(['status' => 'succeeded', 'final_score' => 0.0, 'classification' => 'low']);
+
+        // A scored disqualify: the verdict still shows a zero-score sibling.
+        $scoredDisqualify = $this->seedRun();
+        $scoredDisqualify->update(['status' => 'succeeded', 'final_score' => 12.0, 'classification' => 'disqualify']);
+
+        // A verdict with no zero-score runs at all is omitted, not reported as 0.
+        $scored = $this->seedRun();
+        $scored->update(['status' => 'succeeded', 'final_score' => 80.0, 'classification' => 'high']);
+
+        $this->getJson('/admin/classification-results/stats', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 5)
+            ->assertJsonPath('no_signal', 3)
+            ->assertJsonPath('by_classification.disqualify', 3)
+            ->assertJsonPath('by_classification.low', 1)
+            ->assertJsonPath('by_classification_no_signal', [
+                'disqualify' => 2,
+                'low' => 1,
+            ])
+            ->assertJsonPath('scored', 2)
+            ->assertJsonPath('avg_scored_score', 46);
+    }
+
     public function test_stats_groups_rows_with_no_status_under_unknown(): void
     {
         Stubs::authVerifyOk();
@@ -353,6 +391,7 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('total', 0)
             ->assertJsonPath('by_status', [])
             ->assertJsonPath('by_classification', [])
+            ->assertJsonPath('by_classification_no_signal', [])
             ->assertJsonPath('refusals', 0)
             ->assertJsonPath('scored', 0)
             ->assertJsonPath('no_signal', 0)

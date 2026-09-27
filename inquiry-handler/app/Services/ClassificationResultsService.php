@@ -67,6 +67,7 @@ class ClassificationResultsService
      *     total: int,
      *     by_status: array<string, int>,
      *     by_classification: array<string, int>,
+     *     by_classification_no_signal: array<string, int>,
      *     refusals: int,
      *     scored: int,
      *     no_signal: int,
@@ -96,6 +97,23 @@ class ClassificationResultsService
             $byClassification[(string) $row->classification] = (int) $row->total;
         }
 
+        // Per-verdict zero-score counts, so a consumer can reconcile the verdict
+        // mix against the headline `no_signal` total. These are different cuts:
+        // a run can score 0 and still be recorded as `low` (the empty-catalog
+        // rule maps 0 to low, never disqualify), and a gate decline scores 0 by
+        // construction. Without this, the mix and the zero-signal count look like
+        // they contradict each other. Verdicts with no zero-score runs are
+        // omitted rather than reported as an explicit 0.
+        $byClassificationNoSignal = [];
+        foreach ((clone $base)
+            ->whereNotNull('classification')
+            ->where('final_score', 0)
+            ->selectRaw('classification, count(*) as total')
+            ->groupBy('classification')
+            ->get() as $row) {
+            $byClassificationNoSignal[(string) $row->classification] = (int) $row->total;
+        }
+
         // A NULL score is a run that has not been scored yet (still in flight),
         // which is a third state distinct from "scored zero", so it is counted
         // only via `total` and never folded into either bucket below.
@@ -110,6 +128,7 @@ class ClassificationResultsService
             'total' => (int) (clone $base)->count(),
             'by_status' => $byStatus,
             'by_classification' => $byClassification,
+            'by_classification_no_signal' => $byClassificationNoSignal,
             'refusals' => (int) (clone $base)
                 ->whereNotNull('refusal')
                 ->where('refusal', '<>', '')

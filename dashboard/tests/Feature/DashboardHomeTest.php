@@ -27,6 +27,7 @@ class DashboardHomeTest extends TestCase
                 scored: 36,
                 noSignal: 103,
                 avgScoredScore: 55.77,
+                byClassificationNoSignal: ['disqualify' => 55, 'low' => 48],
             ),
             [
                 UpstreamStubs::classificationResult(id: 9, classification: 'high', score: 88),
@@ -54,6 +55,12 @@ class DashboardHomeTest extends TestCase
             ->assertSee('Excludes 103 zero-signal runs')
             ->assertSee('Refusals')
             ->assertSee('Classification mix')
+            // The mix must show which verdicts are the zero-score ones, or it
+            // reads as contradicting the "103 scored 0" card above it.
+            ->assertSee('55 scored 0')
+            ->assertSee('48 scored 0')
+            // `high` has no zero-score siblings, so it must not claim any.
+            ->assertDontSee('7 scored 0')
             ->assertSee('Recent runs');
     }
 
