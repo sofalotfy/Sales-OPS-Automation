@@ -87,7 +87,7 @@ class DashboardHomeTest extends TestCase
             ->assertSee('Recent runs');
     }
 
-    public function test_dashboard_home_renders_failed_runs_under_needs_attention(): void
+    public function test_dashboard_home_surfaces_failed_runs_in_the_recent_runs_table(): void
     {
         $this->signIn();
         UpstreamStubs::fakeDashboardRuns(
@@ -103,24 +103,14 @@ class DashboardHomeTest extends TestCase
 
         $this->get(route('dashboard'))
             ->assertOk()
-            ->assertSee('Needs attention')
-            ->assertSee('AI provider unreachable.')
-            // One failed run sits outside the newest page, so the page must admit
-            // the count is incomplete rather than implying 1 of 1.
-            ->assertSee('older failed run');
-    }
-
-    public function test_dashboard_home_reports_no_failures_when_the_log_is_clean(): void
-    {
-        $this->signIn();
-        UpstreamStubs::fakeDashboardRuns(
-            UpstreamStubs::classificationStats(),
-            [UpstreamStubs::classificationResult(id: 1)],
-        );
-
-        $this->get(route('dashboard'))
-            ->assertOk()
-            ->assertSee('No runs have failed.');
+            // The dedicated "Needs attention" panel is gone, and the run row's
+            // Failed card now counts no-signal runs rather than crashes, so
+            // nothing on this page reports a crashed run as a total. The Recent
+            // runs Status column is the only remaining surface, so a crashed run
+            // has to stay discoverable through it and link to its stored error.
+            ->assertDontSee('Needs attention')
+            ->assertSee('text-xs text-red-600">Failed</span>', false)
+            ->assertSee(route('classification.show', 3), false);
     }
 
     public function test_dashboard_home_no_longer_shows_documents(): void

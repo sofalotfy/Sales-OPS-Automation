@@ -8,7 +8,6 @@
         $byClassification = is_array($stats['by_classification'] ?? null) ? $stats['by_classification'] : [];
         $byClassificationNoSignal = is_array($stats['by_classification_no_signal'] ?? null) ? $stats['by_classification_no_signal'] : [];
         $inFlightStatuses = ['queued', 'processing', 'researching', 'scope_check', 'scoring'];
-        $failedCount = (int) ($byStatus['failed'] ?? 0);
         $inFlightCount = 0;
         foreach ($inFlightStatuses as $inFlightStatus) {
             $inFlightCount += (int) ($byStatus[$inFlightStatus] ?? 0);
@@ -28,11 +27,6 @@
         $noSignalCount = (int) ($stats['no_signal'] ?? 0);
         $avgScoredScore = $stats['avg_scored_score'] ?? null;
         $scoredShare = ($total ?? 0) > 0 ? (int) round($scoredCount / $total * 100) : 0;
-        $failedOnPage = array_values(array_filter(
-            $results,
-            fn (array $result): bool => ($result['status'] ?? null) === 'failed',
-        ));
-        $failedOffPage = max(0, $failedCount - count($failedOnPage));
     @endphp
 
     <div class="mb-6 flex items-center justify-between">
@@ -100,7 +94,7 @@
             </div>
         </div>
 
-        <div class="mt-8 grid gap-6 lg:grid-cols-2">
+        <div class="mt-8">
             <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h2 class="text-base font-semibold text-slate-900">Classification mix</h2>
 
@@ -127,43 +121,6 @@
                             </li>
                         @endforeach
                     </ul>
-                @endif
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-                <h2 class="text-base font-semibold text-slate-900">Needs attention</h2>
-
-                @if ($failedOnPage === [])
-                    <p class="mt-3 text-sm text-slate-500">
-                        @if ($failedCount === 0)
-                            No runs have failed.
-                        @else
-                            No failed runs among the newest {{ count($results) }}.
-                        @endif
-                    </p>
-                @else
-                    <ul class="mt-3 space-y-3">
-                        @foreach ($failedOnPage as $failed)
-                            <li class="rounded-lg border border-red-100 bg-red-50 px-4 py-3">
-                                <div class="flex items-start justify-between gap-3">
-                                    <p class="text-sm text-red-800">
-                                        {{ $failed['error'] ?? 'The run failed without recording an error.' }}
-                                    </p>
-                                    <a href="{{ route('classification.show', $failed['id']) }}" class="shrink-0 text-sm font-medium text-red-700 hover:text-red-900">View</a>
-                                </div>
-                                <p class="mt-1 text-xs text-red-600">
-                                    {{ \Illuminate\Support\Str::limit($failed['inquiry_message'] ?? '', 80) }}
-                                </p>
-                            </li>
-                        @endforeach
-                    </ul>
-                @endif
-
-                @if ($failedOffPage > 0)
-                    <p class="mt-3 text-xs text-slate-500">
-                        {{ $failedOffPage }} older failed {{ \Illuminate\Support\Str::plural('run', $failedOffPage) }} —
-                        <a href="{{ route('classification.index') }}" class="font-medium text-sky-600 hover:text-sky-500">view all runs</a>.
-                    </p>
                 @endif
             </div>
         </div>
