@@ -90,6 +90,10 @@ services:
       # PHP 8.4 built-in server multi-worker pool: a slow synchronous triage
       # (web research can take minutes) must not block health/admin traffic.
       PHP_CLI_SERVER_WORKERS: "10"
+      # Warnings that explain a research/AI degradation (dropped factors,
+      # unsent batches, guard exhaustion) are only actionable if they surface in
+      # `docker compose logs`; the file channel never materialised in-container.
+      LOG_CHANNEL: stderr
     healthcheck:
       test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8003/health') === false ? 1 : 0);"]
       interval: 5s
@@ -184,6 +188,8 @@ services:
       REDIS_CLIENT: predis
       QUEUE_CONNECTION: redis
       CACHE_STORE: redis
+      # The pipeline runs here, so its diagnostics must be readable here.
+      LOG_CHANNEL: stderr
     depends_on:
       redis:
         condition: service_healthy

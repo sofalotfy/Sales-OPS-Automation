@@ -692,4 +692,117 @@ class AiCallingServiceTest extends TestCase
 
         return false;
     }
+
+    public function test_text_mode_uses_reasoning_when_the_budget_left_no_content(): void
+    {
+        // gpt-oss spends `max_completion_tokens` on its thinking before it writes
+        // the answer, so a completion that reasons past the budget answers 200
+        // with empty content and finish_reason=length. The reasoning is usable
+        // prose for the notes step, so a billed call must not be thrown away.
+        Http::fake([
+            'ai.test/*' => Http::response([
+                'choices' => [[
+                    'message' => ['content' => '', 'reasoning' => 'Example Corp runs a 40-store retail chain.'],
+                    'finish_reason' => 'length',
+                ]],
+                'usage' => ['completion_tokens' => 512],
+            ]),
+        ]);
+        $this->captureLogs();
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'U', 'text' => true, 'max_tokens' => 512],
+        ]);
+
+        $this->assertSame('Example Corp runs a 40-store retail chain.', $result['a'] ?? null);
+        $this->assertTrue($this->capturedLogHas('used its reasoning output instead', 'warning'));
+    }
+
+    public function test_text_mode_falls_back_to_the_reasoning_content_field_alias(): void
+    {
+        // Some providers name the thinking `reasoning_content` instead.
+        Http::fake([
+            'ai.test/*' => Http::response([
+                'choices' => [[
+                    'message' => ['content' => null, 'reasoning_content' => 'SMB across three markets.'],
+                    'finish_reason' => 'length',
+                ]],
+            ]),
+        ]);
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'U', 'text' => true, 'max_tokens' => 512],
+        ]);
+
+        $this->assertSame('SMB across three markets.', $result['a'] ?? null);
+    }
+
+    public function test_text_mode_with_no_content_and_no_reasoning_still_fails_open(): void
+    {
+        // The fallback only rescues a response that actually thought something;
+        // a genuinely empty completion stays a failure.
+        Http::fake([
+            'ai.test/*' => Http::response([
+                'choices' => [[
+                    'message' => ['content' => '   ', 'reasoning' => ''],
+                    'finish_reason' => 'stop',
+                ]],
+            ]),
+        ]);
+
+        $result = $this->service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'U', 'text' => true, 'max_tokens' => 512],
+        ]);
+
+        $this->assertNull($result['a'] ?? null);
+    }
+
+    public function test_complete_many_reports_which_jobs_the_guard_never_sent(): void
+    {
+        // A job the shared budgets never released made no HTTP request at all,
+        // so an empty result for it says nothing about the model. Callers need
+        // that distinction to report a capacity skip instead of a failure.
+        config(['services.ai.guard_wait_seconds' => 0]);
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturn(null);
+        $guard->method('hasCapacity')->willReturn(true);
+        $guard->method('finish');
+        $guard->method('refund');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake(['ai.test/*' => Http::response(['choices' => [['message' => ['content' => 'x']]]], 200)]);
+        $this->captureLogs();
+
+        $result = $service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A', 'text' => true],
+            ['key' => 'b', 'system' => 'S', 'user' => 'B', 'text' => true],
+        ]);
+
+        $this->assertArrayHasKey('a', $result);
+        $this->assertArrayHasKey('b', $result);
+        $this->assertNull($result['a']);
+        $this->assertNull($result['b']);
+        $this->assertSame(['a', 'b'], $service->lastNeverSentJobs());
+        Http::assertNothingSent();
+    }
+
+    public function test_complete_many_clears_the_never_sent_list_once_jobs_are_sent(): void
+    {
+        // A previous batch's skips must not be attributed to the next one.
+        $guard = $this->createMock(AiThroughputGuard::class);
+        $guard->method('start')->willReturn('reserved');
+        $guard->method('hasCapacity')->willReturn(true);
+        $guard->method('finish');
+        $guard->method('refund');
+        $service = new AiCallingService(new PromptBuilder('scope'), $guard);
+        Http::fake(['ai.test/*' => Http::response([
+            'choices' => [['message' => ['content' => 'Notes for the page.']]],
+        ])]);
+
+        $result = $service->completeMany([
+            ['key' => 'a', 'system' => 'S', 'user' => 'A', 'text' => true],
+        ]);
+
+        $this->assertSame('Notes for the page.', $result['a'] ?? null);
+        $this->assertSame([], $service->lastNeverSentJobs());
+    }
 }

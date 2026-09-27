@@ -620,6 +620,7 @@ PROMPT;
 
         $notesTexts = [];
         $failedBatches = 0;
+        $unsentBatches = 0;
         $skippedBatches = 0;
         $succeededBatches = 0;
         $attempts = max(1, (int) config('web_research.note_attempts', 2));
@@ -650,6 +651,11 @@ PROMPT;
 
         for ($attempt = 1; count($pending) > 0 && $attempt <= $attempts; $attempt++) {
             $results = $this->ai->completeMany(array_values($pending));
+            // Only the final wave decides what a batch's outcome was: a job that
+            // was merely skipped earlier is re-offered below, so reading the
+            // outcome once — at the attempt that can no longer be retried —
+            // keeps a late success from being counted as a failure.
+            $neverSent = $attempt === $attempts ? $this->ai->lastNeverSentJobs() : [];
             $next = [];
 
             foreach ($pending as $job) {
@@ -663,7 +669,14 @@ PROMPT;
                 }
 
                 if ($text === null || $text === '') {
-                    $failedBatches++;
+                    // A batch the guard never let out of the queue is a capacity
+                    // skip, not a model failure: no request was made, so there is
+                    // nothing to attribute to the model or the prompt.
+                    if (in_array((string) $job['key'], $neverSent, true)) {
+                        $unsentBatches++;
+                    } else {
+                        $failedBatches++;
+                    }
 
                     continue;
                 }
@@ -678,6 +691,7 @@ PROMPT;
         if ($succeededBatches === 0) {
             Log::warning('Research extraction produced no notes: every note batch failed or was skipped.', [
                 'failed_batches' => $failedBatches,
+                'unsent_batches' => $unsentBatches,
                 'skipped_batches' => $skippedBatches,
                 'total_batches' => count($batches),
             ]);
@@ -685,18 +699,33 @@ PROMPT;
             return null;
         }
 
-        $incomplete = $failedBatches + $skippedBatches > 0;
+        // Each cause is named separately: a truncated completion, a batch the
+        // shared AI capacity never released, and a batch the research time
+        // budget expired on need different fixes, so they must not be merged
+        // into one "failed" count.
+        $gaps = [];
+
+        if ($failedBatches > 0) {
+            $gaps[] = "{$failedBatches} batch(es) failed";
+        }
+
+        if ($unsentBatches > 0) {
+            $gaps[] = "{$unsentBatches} not sent (no AI capacity)";
+        }
+
+        if ($skippedBatches > 0) {
+            $gaps[] = "{$skippedBatches} skipped for time";
+        }
+
+        $incomplete = $gaps !== [];
         $gap = $incomplete
-            ? 'Some fetched pages could not be analysed ('
-                .($failedBatches > 0 ? "{$failedBatches} batch(es) failed" : '')
-                .($failedBatches > 0 && $skippedBatches > 0 ? ', ' : '')
-                .($skippedBatches > 0 ? "{$skippedBatches} skipped for time" : '')
-                .'), so the profile may be incomplete.'
+            ? 'Some fetched pages could not be analysed ('.implode(', ', $gaps).'), so the profile may be incomplete.'
             : null;
 
         if ($incomplete) {
             Log::warning('Research profile incomplete: some note batches were not analysed.', [
                 'failed_batches' => $failedBatches,
+                'unsent_batches' => $unsentBatches,
                 'skipped_batches' => $skippedBatches,
                 'total_batches' => count($batches),
             ]);

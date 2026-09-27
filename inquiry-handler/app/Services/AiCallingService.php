@@ -32,6 +32,18 @@ class AiCallingService
      */
     private const MAX_SCHEDULING_ROUNDS = 300;
 
+    /**
+     * Job keys from the most recent completeMany() that never reached the
+     * provider because the shared guard had no capacity inside the wait budget,
+     * as opposed to jobs that were sent and came back unusable. A caller that
+     * reports on the batch needs the difference: the first is a scheduling
+     * skip, the second is a provider failure, and conflating them reports a
+     * capacity problem as a broken model.
+     *
+     * @var list<string>
+     */
+    private array $lastNeverSent = [];
+
     public function __construct(
         private readonly PromptBuilder $promptBuilder,
         private readonly AiThroughputGuard $guard,
@@ -314,6 +326,9 @@ class AiCallingService
         }
 
         if ($key === '' || $pending === []) {
+            // Without a key nothing can be sent, so every job is a skip.
+            $this->lastNeverSent = array_map(strval(...), array_keys($results));
+
             return $results;
         }
 
@@ -533,6 +548,8 @@ class AiCallingService
 
         $neverSent = array_values(array_diff(array_keys($pending), array_keys($sent)));
 
+        $this->lastNeverSent = array_map(strval(...), $neverSent);
+
         if ($neverSent !== []) {
             Log::warning('AI guard budget stayed exhausted; analysis jobs failed open (never sent).', [
                 'jobs' => $neverSent,
@@ -600,6 +617,20 @@ class AiCallingService
     }
 
     /**
+     * Job keys the most recent completeMany() never sent to the provider.
+     *
+     * Callers use this to tell a capacity skip apart from a genuine failure:
+     * these jobs made no HTTP request at all, so an empty result for them says
+     * nothing about the model or the prompt.
+     *
+     * @return list<string>
+     */
+    public function lastNeverSentJobs(): array
+    {
+        return $this->lastNeverSent;
+    }
+
+    /**
      * Release one job's reservation once it is resolved (no-op for tokens that
      * were never granted).
      *
@@ -639,15 +670,50 @@ class AiCallingService
             }
         }
 
-        if ($response->successful()) {
-            $content = $response->json('choices.0.message.content');
-
-            if (is_string($content) && ($textMode ? trim($content) !== '' : true)) {
-                return $textMode ? trim($content) : $this->extractJsonArray($content);
-            }
+        if (! $response->successful()) {
+            return null;
         }
 
-        return null;
+        if ($textMode) {
+            return $this->resolveText($response);
+        }
+
+        $content = $response->json('choices.0.message.content');
+
+        return is_string($content) ? $this->extractJsonArray($content) : null;
+    }
+
+    /**
+     * Text-mode decode for one response.
+     *
+     * A reasoning model (gpt-oss) spends `max_completion_tokens` on its thinking
+     * before it writes the answer, so a completion that reasons past the budget
+     * returns 200 with an empty `content` and `finish_reason: length`. That
+     * reasoning is still useful prose, so it is used as the fallback rather than
+     * discarding a call that was billed — and the truncation is logged, because
+     * a "batch failed" whose provider dashboard shows only 200s is otherwise
+     * unattributable.
+     */
+    private function resolveText(Response $response): ?string
+    {
+        $content = $response->json('choices.0.message.content');
+        $content = is_string($content) ? trim($content) : '';
+
+        if ($content !== '') {
+            return $content;
+        }
+
+        $reasoning = $response->json('choices.0.message.reasoning')
+            ?? $response->json('choices.0.message.reasoning_content');
+        $reasoning = is_string($reasoning) ? trim($reasoning) : '';
+
+        Log::warning('AI text completion returned no content; used its reasoning output instead.', [
+            'finish_reason' => $response->json('choices.0.finish_reason'),
+            'reasoning_chars' => mb_strlen($reasoning),
+            'completion_tokens' => $response->json('usage.completion_tokens'),
+        ]);
+
+        return $reasoning !== '' ? $reasoning : null;
     }
 
     /**

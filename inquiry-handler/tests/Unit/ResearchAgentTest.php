@@ -36,6 +36,8 @@ class ResearchAgentTest extends TestCase
         $queue = $aiResponses;
 
         $ai = Mockery::mock(AiCallingService::class);
+        // Every job was sent; the guard never held one back.
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
         $ai->shouldReceive('complete')->andReturnUsing(function (string $system, string $user, ?string $model = null) use (&$queue) {
             $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
 
@@ -487,6 +489,8 @@ class ResearchAgentTest extends TestCase
 
         $concurrentRounds = 0;
         $ai = Mockery::mock(AiCallingService::class);
+        // Every job was sent; the guard never held one back.
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
         $ai->shouldReceive('complete')->andReturnUsing(
             function (string $system, string $user, ?string $model = null) {
                 $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
@@ -541,6 +545,8 @@ class ResearchAgentTest extends TestCase
         $pages = [$url => $this->page('Page A', $url, str_repeat('x', 1200).' body')];
 
         $ai = Mockery::mock(AiCallingService::class);
+        // Every job was sent; the guard never held one back.
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
         $ai->shouldReceive('complete')->andReturnUsing(
             function (string $system, string $user, ?string $model = null) {
                 $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
@@ -583,6 +589,8 @@ class ResearchAgentTest extends TestCase
 
         $url = 'https://example.com';
         $ai = Mockery::mock(AiCallingService::class);
+        // Every job was sent; the guard never held one back.
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
         $ai->shouldReceive('complete')->andReturnUsing(
             function (string $system, string $user, ?string $model = null) {
                 $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
@@ -700,6 +708,8 @@ class ResearchAgentTest extends TestCase
         }
 
         $ai = Mockery::mock(AiCallingService::class);
+        // Every job was sent; the guard never held one back.
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
         $ai->shouldReceive('complete')->andReturnUsing(
             function (string $system, string $user, ?string $model = null) {
                 $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
@@ -773,6 +783,8 @@ class ResearchAgentTest extends TestCase
         $bad = 'https://bad.example';
 
         $ai = Mockery::mock(AiCallingService::class);
+        // Every job was sent; the guard never held one back.
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
         $ai->shouldReceive('complete')->andReturnUsing(
             function (string $system, string $user, ?string $model = null) {
                 $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
@@ -831,5 +843,102 @@ class ResearchAgentTest extends TestCase
                 'context' => $event->context,
             ];
         });
+    }
+
+    public function test_never_sent_note_batches_are_reported_as_a_capacity_skip_not_a_failure(): void
+    {
+        // The guard held one batch back, so that job made no provider request at
+        // all. Reporting it as "failed" blames the model for a capacity skip;
+        // the gap text has to name the real cause.
+        config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_batch_input_chars', 1000);
+        config()->set('web_research.note_attempts', 1);
+
+        $good = 'https://good.example';
+        $held = 'https://held.example';
+
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn(['1'])->byDefault();
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                return count($this->aiCalls) === 1
+                    ? $this->filterOk([1, 2])
+                    : 'Extraction from the batch that ran.';
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(function (array $jobs) {
+            $results = [];
+
+            foreach ($jobs as $job) {
+                $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+
+                $results[$job['key']] = $job['key'] === '0' ? 'Notes from the page that ran.' : null;
+            }
+
+            return $results;
+        });
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher([
+            $good => $this->page('Good', $good, str_repeat('x', 1200).' body'),
+            $held => $this->page('Held', $held, str_repeat('x', 1200).' body'),
+        ]));
+        $result = $agent->research($this->criteria(), $this->payload([
+            $this->candidate('Good', $good),
+            $this->candidate('Held', $held),
+        ]));
+
+        $this->assertSame(ResearchOutcome::Partial, $result->outcome);
+        $this->assertStringContainsString('1 not sent (no AI capacity)', (string) $result->limitations);
+        $this->assertStringNotContainsString('batch(es) failed', (string) $result->limitations);
+    }
+
+    public function test_note_batches_that_were_sent_but_came_back_empty_still_count_as_failed(): void
+    {
+        // The counterpart: a batch the provider answered with nothing usable was
+        // genuinely sent, so it must keep the "failed" wording.
+        config()->set('web_research.summary_max_input_chars', 1000);
+        config()->set('web_research.note_batch_input_chars', 1000);
+        config()->set('web_research.note_attempts', 1);
+
+        $good = 'https://good.example';
+        $empty = 'https://empty.example';
+
+        $ai = Mockery::mock(AiCallingService::class);
+        $ai->shouldReceive('lastNeverSentJobs')->andReturn([])->byDefault();
+        $ai->shouldReceive('complete')->andReturnUsing(
+            function (string $system, string $user, ?string $model = null) {
+                $this->aiCalls[] = ['system' => $system, 'user' => $user, 'model' => $model ?? ''];
+
+                return count($this->aiCalls) === 1
+                    ? $this->filterOk([1, 2])
+                    : 'Extraction from the batch that ran.';
+            },
+        );
+        $ai->shouldReceive('completeMany')->andReturnUsing(function (array $jobs) {
+            $results = [];
+
+            foreach ($jobs as $job) {
+                $this->aiCalls[] = ['system' => $job['system'], 'user' => $job['user'], 'model' => $job['model'] ?? ''];
+
+                $results[$job['key']] = $job['key'] === '0' ? 'Notes from the page that ran.' : null;
+            }
+
+            return $results;
+        });
+
+        $agent = new ResearchAgent($ai, $this->fakeFetcher([
+            $good => $this->page('Good', $good, str_repeat('x', 1200).' body'),
+            $empty => $this->page('Empty', $empty, str_repeat('x', 1200).' body'),
+        ]));
+        $result = $agent->research($this->criteria(), $this->payload([
+            $this->candidate('Good', $good),
+            $this->candidate('Empty', $empty),
+        ]));
+
+        $this->assertSame(ResearchOutcome::Partial, $result->outcome);
+        $this->assertStringContainsString('1 batch(es) failed', (string) $result->limitations);
+        $this->assertStringNotContainsString('not sent', (string) $result->limitations);
     }
 }
