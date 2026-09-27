@@ -31,4 +31,19 @@ enum InquiryRunStatus: string
     {
         return $this === self::Succeeded || $this === self::Failed;
     }
+
+    /**
+     * Whether the run has not reached a verdict yet.
+     *
+     * Only the scoring stage writes `classification`, so a run still in the
+     * pipeline has none to filter on. Pairing one of these statuses with a
+     * classification matches nothing and reads as "runs classified this way
+     * that are still working", which is a claim about runs that does not hold:
+     * they are simply unclassified. Filters drop the classification for these
+     * instead of returning an empty set.
+     */
+    public function awaitsClassification(): bool
+    {
+        return ! $this->isTerminal();
+    }
 }

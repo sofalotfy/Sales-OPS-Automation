@@ -229,6 +229,55 @@ class ClassificationResultsAdminTest extends TestCase
             ->assertJsonPath('items.0.classification', 'low');
     }
 
+    public function test_index_ignores_a_classification_filter_before_the_run_is_scored(): void
+    {
+        Stubs::authVerifyOk();
+
+        // One run still in the pipeline, one already classified.
+        $inFlight = $this->seedRun();
+        $inFlight->update(['status' => 'scoring', 'classification' => null, 'final_score' => null]);
+
+        $scored = $this->seedRun();
+        $scored->update(['status' => 'succeeded', 'classification' => 'high', 'final_score' => 80.0]);
+
+        // The scoring run has no verdict, so `classification=high` cannot be
+        // answered. Returning an empty log would claim there are no high-scoring
+        // runs at all, when the truthful answer is "one run is mid-scoring".
+        $this->getJson('/admin/classification-results?status=scoring&classification=high', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonCount(1, 'items')
+            ->assertJsonPath('items.0.id', $inFlight->id)
+            ->assertJsonPath('items.0.status', 'scoring')
+            ->assertJsonPath('items.0.classification', null);
+
+        // The drop is scoped to that status pair: the same classification filter
+        // on its own still means "classified high".
+        $this->getJson('/admin/classification-results?classification=high', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('items.0.id', $scored->id);
+    }
+
+    public function test_index_keeps_the_classification_filter_once_the_run_reaches_a_verdict(): void
+    {
+        Stubs::authVerifyOk();
+
+        // `failed` is terminal rather than pre-scoring: the run got past the
+        // pipeline, so a classification alongside it stays a real filter.
+        $run = $this->seedRun();
+        $run->update(['status' => 'failed', 'classification' => 'high', 'final_score' => 80.0]);
+
+        $run = $this->seedRun();
+        $run->update(['status' => 'failed', 'classification' => 'low', 'final_score' => 50.0]);
+
+        $this->getJson('/admin/classification-results?status=failed&classification=high', ['Authorization' => 'Bearer token'])
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonCount(1, 'items')
+            ->assertJsonPath('items.0.classification', 'high');
+    }
+
     public function test_index_treats_blank_filters_as_unfiltered(): void
     {
         Stubs::authVerifyOk();

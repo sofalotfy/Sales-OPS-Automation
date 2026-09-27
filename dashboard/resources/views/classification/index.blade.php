@@ -90,7 +90,12 @@
             'classification' => $classificationFilter,
         ], fn ($value): bool => $value !== null))
 
-        <form method="GET" action="{{ route('classification.index') }}" class="mb-4 flex flex-wrap items-end gap-3">
+        <form
+            id="classification-filters"
+            method="GET"
+            action="{{ route('classification.index') }}"
+            class="mb-4 flex flex-wrap items-end gap-3"
+        >
             <div>
                 <label for="filter-status" class="mb-1 block text-xs font-medium text-slate-500">Status</label>
                 <select
@@ -107,20 +112,31 @@
 
             <div>
                 <label for="filter-classification" class="mb-1 block text-xs font-medium text-slate-500">Classification</label>
+                {{-- The pre-scoring statuses are published to the page so the
+                     auto-submit script disables this select for them from the
+                     same list the controller filters on, instead of a second
+                     copy of it kept in JavaScript. --}}
                 <select
                     id="filter-classification"
                     name="classification"
-                    class="block rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-sky-500"
+                    data-pre-classification-statuses="{{ implode(',', $preClassificationStatuses) }}"
+                    @disabled(! $classificationSelectable)
+                    class="block rounded-md border border-slate-300 px-3 py-1.5 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-sky-500 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
                 >
                     <option value="">All classifications</option>
                     @foreach ($classifications as $classificationOption)
                         <option value="{{ $classificationOption }}" @selected($classificationFilter === $classificationOption)>{{ ucfirst($classificationOption) }}</option>
                     @endforeach
                 </select>
+                <p id="filter-classification-hint" class="mt-1 max-w-[16rem] text-xs text-slate-400 {{ $classificationSelectable ? 'hidden' : '' }}">
+                    No verdict yet at this stage, so runs here are not filtered by classification.
+                </p>
             </div>
 
             {{-- Applying a filter always restarts at page 1: page 7 of a set that
-                 now holds two pages is an empty table, not the last page. --}}
+                 now holds two pages is an empty table, not the last page. The
+                 selects submit themselves on change, so this button only matters
+                 without JavaScript. --}}
             <button type="submit" class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500">
                 Apply filters
             </button>

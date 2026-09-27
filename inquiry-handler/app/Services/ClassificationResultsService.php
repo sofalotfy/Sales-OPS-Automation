@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\InquiryRunStatus;
 use App\Models\ClassificationResult;
 use Throwable;
 
@@ -42,6 +43,16 @@ class ClassificationResultsService
     ): array {
         $status = ($status === null || $status === '') ? null : $status;
         $classification = ($classification === null || $classification === '') ? null : $classification;
+
+        // A run still in the pipeline has no verdict yet, so a classification
+        // filter alongside it can only match nothing. Ignoring it answers the
+        // question the caller actually asked ("what is still scoring?") instead
+        // of reporting an empty log. An unknown status keeps the
+        // classification: validation belongs to the controller, and dropping a
+        // filter on a value this method cannot judge would be a silent guess.
+        if (InquiryRunStatus::tryFrom((string) $status)?->awaitsClassification() === true) {
+            $classification = null;
+        }
 
         $query = ClassificationResult::query();
 

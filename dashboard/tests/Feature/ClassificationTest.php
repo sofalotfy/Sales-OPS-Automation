@@ -208,6 +208,76 @@ class ClassificationTest extends TestCase
             ->assertDontSee('No inquiries classified yet');
     }
 
+    public function test_index_drops_the_classification_filter_for_a_status_scored_later(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1, status: 'scoring')],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        // A run still in the pipeline has no verdict, so the classification
+        // filter cannot narrow it. Forwarding both would report an empty log and
+        // read as "no high-scoring runs are scoring".
+        $this->get(route('classification.index', ['status' => 'scoring', 'classification' => 'high']))
+            ->assertOk()
+            ->assertSee('<option value="scoring" selected>', false)
+            // The select is reset and disabled, so the page cannot resubmit a
+            // classification that was just discarded.
+            ->assertSee('disabled', false)
+            ->assertDontSee('<option value="high" selected>', false)
+            ->assertSee('No verdict yet at this stage', false);
+
+        $query = $this->sentListQuery();
+        $this->assertSame('scoring', $query['status'] ?? null);
+        $this->assertArrayNotHasKey('classification', $query);
+    }
+
+    public function test_index_keeps_the_classification_filter_for_a_reached_status(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 1, classification: 'high')],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index', ['status' => 'succeeded', 'classification' => 'high']))
+            ->assertOk()
+            ->assertSee('<option value="high" selected>', false);
+
+        $query = $this->sentListQuery();
+        $this->assertSame('succeeded', $query['status'] ?? null);
+        $this->assertSame('high', $query['classification'] ?? null);
+    }
+
+    public function test_index_publishes_the_pre_classification_statuses_to_the_page(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response(['factors' => [], 'stored' => []], 200),
+            fn () => Http::response(['items' => [], 'total' => 0, 'limit' => 20, 'offset' => 0], 200),
+        );
+
+        // The auto-submit script reads this list off the select so the rule
+        // lives with the controller instead of being copied into JavaScript.
+        $this->get(route('classification.index'))
+            ->assertOk()
+            ->assertSee(
+                'data-pre-classification-statuses="queued,processing,researching,scope_check,scoring"',
+                false,
+            );
+    }
+
     public function test_index_renders_in_flight_runs_with_neutral_badge_and_placeholder(): void
     {
         $this->signIn();

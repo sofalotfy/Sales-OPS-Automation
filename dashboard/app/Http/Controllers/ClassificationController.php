@@ -35,6 +35,21 @@ class ClassificationController extends Controller
     /** @var list<string> */
     private const CLASSIFICATIONS = ['high', 'medium', 'low', 'disqualify'];
 
+    /**
+     * Statuses reached before the scoring stage writes a verdict.
+     *
+     * Mirrors `InquiryRunStatus::awaitsClassification()` on the inquiry handler.
+     * A run in one of these states has no classification yet, so the second
+     * filter is dropped rather than sent: `status=scoring&classification=high`
+     * would answer "no high-scoring runs are scoring" when the truthful answer
+     * is "no run is scored yet at all".
+     *
+     * @var list<string>
+     */
+    private const PRE_CLASSIFICATION_STATUSES = [
+        'queued', 'processing', 'researching', 'scope_check', 'scoring',
+    ];
+
     public function index(Request $request): View|RedirectResponse
     {
         $page = max(1, (int) $request->integer('page', 1));
@@ -45,6 +60,15 @@ class ClassificationController extends Controller
         // the filter instead of reaching the handler, which answers 422.
         $status = $this->clean($request->query('status'), self::STATUSES);
         $classification = $this->clean($request->query('classification'), self::CLASSIFICATIONS);
+
+        // Before the scoring stage there is no verdict to match on. Dropping the
+        // classification here keeps the URL, the selects, and the rows in
+        // agreement; the handler enforces the same rule for direct API callers.
+        $classificationSelectable = ! in_array($status, self::PRE_CLASSIFICATION_STATUSES, true);
+
+        if (! $classificationSelectable) {
+            $classification = null;
+        }
 
         $client = app(InquiryHandlerApiClient::class);
 
@@ -90,6 +114,8 @@ class ClassificationController extends Controller
             'classificationFilter' => $classification,
             'statuses' => self::STATUSES,
             'classifications' => self::CLASSIFICATIONS,
+            'classificationSelectable' => $classificationSelectable,
+            'preClassificationStatuses' => self::PRE_CLASSIFICATION_STATUSES,
         ]);
     }
 
