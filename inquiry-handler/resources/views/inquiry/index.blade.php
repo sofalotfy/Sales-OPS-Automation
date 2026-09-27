@@ -43,24 +43,7 @@
 
         <button id="submit" type="submit">Send inquiry</button>
 
-        <div class="result" id="result" hidden>
-            <div class="tag" id="result-tag"></div>
-            <div class="score" id="result-score"></div>
-            <div class="reply" id="result-reply"></div>
-            <div class="factors" id="factors" hidden>
-                <div class="retrieved-title">Factor scores <span id="factor-count"></span></div>
-                <ul id="factor-list"></ul>
-            </div>
-            <div class="dropped" id="dropped" hidden>
-                <div class="retrieved-title">Dropped factors</div>
-                <ul id="dropped-list"></ul>
-            </div>
-            <div class="retrieved" id="system-prompt" hidden>
-                <div class="retrieved-title">System prompt</div>
-                <pre class="prompt-text" id="system-prompt-text"></pre>
-            </div>
-        </div>
-        <div class="error" id="error" hidden></div>
+        <div class="status" id="status" hidden></div>
     </form>
 @endsection
 
@@ -74,137 +57,21 @@
 
     const form = document.getElementById('inquiry-form');
     const submit = document.getElementById('submit');
-    const result = document.getElementById('result');
-    const resultTag = document.getElementById('result-tag');
-    const resultScore = document.getElementById('result-score');
-    const resultReply = document.getElementById('result-reply');
-    const errorBox = document.getElementById('error');
-    const factors = document.getElementById('factors');
-    const factorList = document.getElementById('factor-list');
-    const factorCount = document.getElementById('factor-count');
-    const dropped = document.getElementById('dropped');
-    const droppedList = document.getElementById('dropped-list');
+    const status = document.getElementById('status');
 
-    function show(data) {
-        resultTag.textContent = (data.classification ?? 'unknown').charAt(0).toUpperCase() + (data.classification ?? '').slice(1);
-        resultScore.textContent = `Score: ${typeof data.score === 'number' ? data.score : '-'}`;
-        resultReply.textContent = data.reply ?? '';
-        result.hidden = false;
-        errorBox.hidden = true;
-
-        showFactors(data);
-        showDropped(data);
-        showSystemPrompt(data);
+    function showStatus(text, isError) {
+        status.textContent = text;
+        status.classList.toggle('error', isError);
+        status.hidden = false;
     }
-
-    function showFactors(data) {
-        const entries = Object.entries(data.factor_scores ?? {});
-        factorList.innerHTML = '';
-
-        for (const [name, score] of entries) {
-            const li = document.createElement('li');
-            li.className = 'retrieved-item';
-
-            const head = document.createElement('div');
-            head.className = 'retrieved-head';
-            head.textContent = `${name} · ${score.score} · weight ${score.weight}`;
-
-            const body = document.createElement('p');
-            body.className = 'retrieved-text';
-            body.textContent = score.reasoning ?? '';
-
-            li.append(head, body);
-            factorList.append(li);
-        }
-
-        if (entries.length > 0) {
-            factorCount.textContent = `(${entries.length})`;
-            factors.hidden = false;
-        } else {
-            factors.hidden = true;
-        }
-    }
-
-    function showDropped(data) {
-        const entries = Array.isArray(data.dropped_factors) ? data.dropped_factors : [];
-        droppedList.innerHTML = '';
-
-        for (const d of entries) {
-            const li = document.createElement('li');
-            li.className = 'retrieved-item';
-            const head = document.createElement('div');
-            head.className = 'retrieved-head';
-            head.textContent = d.name;
-            const body = document.createElement('p');
-            body.className = 'retrieved-text';
-            body.textContent = d.reason ?? '';
-            li.append(head, body);
-            droppedList.append(li);
-        }
-
-        dropped.hidden = entries.length === 0;
-    }
-
-    function showSystemPrompt(data) {
-        const section = document.getElementById('system-prompt');
-        const promptText = document.getElementById('system-prompt-text');
-        const prompt = data.context?.system_prompt;
-
-        if (typeof prompt === 'string' && prompt !== '') {
-            promptText.textContent = prompt;
-            section.hidden = false;
-        } else {
-            promptText.textContent = 'System prompt was not recorded for this run.';
-            section.hidden = false;
-        }
-    }
-
-    function showError(text) {
-        errorBox.textContent = text;
-        errorBox.hidden = false;
-        result.hidden = true;
-    }
-
-    const terminalStatuses = new Set(['succeeded', 'failed']);
 
     // POST /inquiry/triage hands the run to the Redis queue and answers 202, so
-    // the classification only exists once the worker has finished it. Poll the
-    // run until it reaches a terminal status, then render the result envelope.
-    async function pollForResult(inquiryId) {
-        for (let attempt = 0; attempt < 300; attempt++) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-
-            const response = await fetch(`/inquiry/${inquiryId}`, {
-                headers: { 'X-CRM-Key': crmKey, 'Accept': 'application/json' },
-            });
-
-            if (!response.ok) {
-                throw new Error('Lost track of the run.');
-            }
-
-            const data = await response.json();
-
-            if (!terminalStatuses.has(data.status)) {
-                continue;
-            }
-
-            if (data.status === 'failed') {
-                throw new Error(data.error ?? 'The run failed.');
-            }
-
-            if (!data.result) {
-                throw new Error('The run finished without a result.');
-            }
-
-            return data.result;
-        }
-
-        throw new Error('The run is still going. Check back in a moment.');
-    }
-
+    // this console only enqueues. Nothing here waits on or renders the
+    // classification; outcomes are inspected on the dashboard instead.
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         submit.disabled = true;
+        status.hidden = true;
 
         try {
             const response = await fetch('/inquiry/triage', {
@@ -228,13 +95,13 @@
             const data = await response.json();
 
             if (!response.ok) {
-                showError(data.detail ?? 'Something went wrong. Please try again.');
+                showStatus(data.detail ?? 'Something went wrong. Please try again.', true);
                 return;
             }
 
-            show(await pollForResult(data.inquiry_id));
-        } catch (error) {
-            showError(error.message || 'Could not reach the service. Please try again shortly.');
+            showStatus(`Queued · #${String(data.inquiry_id ?? '').slice(0, 8)}`, false);
+        } catch {
+            showStatus('Could not reach the service. Please try again shortly.', true);
         } finally {
             submit.disabled = false;
         }

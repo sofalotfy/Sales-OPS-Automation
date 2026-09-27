@@ -41,19 +41,22 @@
 
                 <p class="text-slate-700">{{ $record['inquiry_message'] ?? '' }}</p>
 
-                @php($contactName = trim(($record['first_name'] ?? '').' '.($record['last_name'] ?? '')))
-                @if ($contactName !== '' || ! empty($record['email']))
-                    <p class="mt-4 text-sm text-slate-500">
-                        @if ($contactName !== ''){{ $contactName }}@endif
-                        @if (! empty($record['email']))<span class="text-slate-400"> · {{ $record['email'] }}</span>@endif
-                    </p>
+                @php($contactParts = array_filter([
+                    trim(($record['first_name'] ?? '').' '.($record['last_name'] ?? '')),
+                    (string) ($record['email'] ?? ''),
+                    (string) ($record['phone_number'] ?? ''),
+                    (string) ($record['company_name'] ?? ''),
+                    (string) ($record['country_region'] ?? ''),
+                ]))
+                @if ($contactParts !== [])
+                    <p class="mt-4 text-sm text-slate-500">{{ implode(' · ', $contactParts) }}</p>
                 @endif
 
                 <div class="mt-6 rounded-lg bg-slate-50 px-4 py-3">
                     <p class="text-xs font-medium uppercase tracking-wide text-slate-400">Reasoning</p>
                     <p class="mt-1 text-sm text-slate-700">{{ $record['reasoning'] ?? '—' }}</p>
                     <p class="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">Final score</p>
-                    <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $record['final_score'] ?? null === null ? '—' : $record['final_score'] }}</p>
+                    <p class="mt-1 text-2xl font-semibold text-slate-900">{{ $record['final_score'] ?? '—' }}</p>
                 </div>
             </div>
 
@@ -115,6 +118,84 @@
                 <p class="mt-3 whitespace-pre-line text-sm text-slate-600">{{ $systemPrompt }}</p>
             @endif
         </div>
+
+        @php($scopeCheckOutcome = trim((string) ($record['scope_check_outcome'] ?? '')))
+        @php($scopeCheckReason = trim((string) ($record['scope_check_reason'] ?? '')))
+        @php($refusal = trim((string) ($record['refusal'] ?? '')))
+        @php($retrievedContext = is_array($record['retrieved_context'] ?? null) ? $record['retrieved_context'] : null)
+        @php($campaignId = trim((string) ($record['campaign_id'] ?? '')))
+        @php($leadId = trim((string) ($record['lead_id'] ?? '')))
+        @php($updatedAt = trim((string) ($record['updated_at'] ?? '')))
+        @if ($scopeCheckOutcome !== '' || $scopeCheckReason !== '' || $refusal !== '' || $retrievedContext !== null || $campaignId !== '' || $leadId !== '' || $updatedAt !== '')
+            <div class="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 class="text-base font-semibold text-slate-900">Run details</h2>
+
+                @if ($scopeCheckOutcome !== '' || $scopeCheckReason !== '')
+                    <div class="mt-4 flex items-start justify-between gap-4">
+                        <p class="text-xs font-medium uppercase tracking-wide text-slate-400">Scope check</p>
+                        @if ($scopeCheckOutcome !== '')
+                            @php($scopeCheckColor = match ($scopeCheckOutcome) {
+                                'decline' => 'text-red-600',
+                                'indeterminate' => 'text-amber-600',
+                                default => 'text-emerald-600',
+                            })
+                            <span class="text-sm capitalize {{ $scopeCheckColor }}">{{ $scopeCheckOutcome }}</span>
+                        @endif
+                    </div>
+                    @if ($scopeCheckReason !== '')
+                        <p class="mt-1 text-sm text-slate-600">{{ $scopeCheckReason }}</p>
+                    @endif
+                @endif
+
+                @if ($refusal !== '')
+                    <div class="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+                        <p class="text-xs font-semibold uppercase tracking-wide text-red-700">Refusal</p>
+                        <p class="mt-1 text-sm text-red-800">{{ $refusal }}</p>
+                    </div>
+                @endif
+
+                @if ($retrievedContext !== null)
+                    @php($contextResults = is_array($retrievedContext['results'] ?? null) ? $retrievedContext['results'] : [])
+                    @php($resultCount = $retrievedContext['result_count'] ?? count($contextResults))
+                    <details class="mt-4 rounded-lg border border-slate-100 bg-slate-50 px-4 py-3">
+                        <summary class="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-400">Retrieved context ({{ $resultCount }})</summary>
+                        @if ($contextResults === [])
+                            <p class="mt-2 text-sm text-slate-500">No context passages were retained for this run.</p>
+                        @else
+                            <ul class="mt-3 space-y-3">
+                                @foreach ($contextResults as $contextResult)
+                                    @php($contextTitle = trim((string) ($contextResult['title'] ?? '')))
+                                    @php($contextText = trim((string) ($contextResult['text'] ?? '')))
+                                    @php($contextDocumentId = trim((string) ($contextResult['document_id'] ?? '')))
+                                    <li class="border-t border-slate-200 pt-3 first:border-0 first:pt-0">
+                                        <div class="flex items-start justify-between gap-4">
+                                            <p class="text-sm font-medium text-slate-700">{{ $contextTitle !== '' ? $contextTitle : 'Untitled passage' }}</p>
+                                            @if (isset($contextResult['similarity_score']))
+                                                <span class="shrink-0 text-xs text-slate-400">score {{ $contextResult['similarity_score'] }}</span>
+                                            @endif
+                                        </div>
+                                        @if ($contextText !== '')
+                                            <p class="mt-1 text-sm text-slate-600">{{ $contextText }}</p>
+                                        @endif
+                                        @if ($contextDocumentId !== '')
+                                            <p class="mt-1 text-xs text-slate-400">{{ $contextDocumentId }}</p>
+                                        @endif
+                                    </li>
+                                @endforeach
+                            </ul>
+                        @endif
+                    </details>
+                @endif
+
+                @if ($campaignId !== '' || $leadId !== '' || $updatedAt !== '')
+                    <div class="mt-4 border-t border-slate-100 pt-4 text-sm text-slate-500">
+                        @if ($campaignId !== '')<span>Campaign <span class="text-slate-700">{{ $campaignId }}</span></span>@endif
+                        @if ($leadId !== '')<span class="ml-4">Lead <span class="text-slate-700">{{ $leadId }}</span></span>@endif
+                        @if ($updatedAt !== '')<span class="ml-4">Updated <span class="text-slate-700">{{ \Illuminate\Support\Carbon::parse($updatedAt)->toDayDateTimeString() }}</span></span>@endif
+                    </div>
+                @endif
+            </div>
+        @endif
 
         @php($webResearch = is_array($record['web_research'] ?? null) ? $record['web_research'] : null)
         @if (is_array($webResearch))

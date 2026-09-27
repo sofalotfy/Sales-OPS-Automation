@@ -41,7 +41,6 @@
         }
         textarea { min-height: 120px; resize: vertical; }
         .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        .hint { color: var(--muted); font-size: .78rem; margin: 4px 0 0; }
         button {
             margin-top: 20px;
             width: 100%;
@@ -55,19 +54,8 @@
             cursor: pointer;
         }
         button:disabled { opacity: .6; cursor: wait; }
-        .result { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px; }
-        .result .tag { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-        .result .reply { margin-top: 6px; font-size: 1rem; }
-        .retrieved { margin-top: 20px; border-top: 1px dashed var(--border); padding-top: 14px; }
-        .retrieved-title { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-        .retrieved-title span { font-weight: 400; text-transform: none; letter-spacing: 0; }
-        .retrieved ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
-        .retrieved-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
-        .retrieved-head { font-size: .85rem; font-weight: 600; }
-        .retrieved-source { font-size: .75rem; color: var(--muted); margin-top: 2px; }
-        .retrieved-text { font-size: .82rem; line-height: 1.45; margin: 6px 0 0; color: #374151; }
-        .prompt-text { font-size: .82rem; line-height: 1.55; margin: 10px 0 0; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; white-space: pre-wrap; word-break: break-word; color: #374151; }
-        .error { color: #b91c1c; margin-top: 12px; font-size: .9rem; }
+        .status { margin-top: 12px; font-size: .9rem; color: var(--muted); }
+        .status.error { color: #b91c1c; }
     </style>
 </head>
 <body>

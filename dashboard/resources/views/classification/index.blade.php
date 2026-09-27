@@ -121,7 +121,7 @@
                                 <td class="px-4 py-3">
                                     <x-classification-badge :classification="$result['classification'] ?? null" />
                                 </td>
-                                <td class="px-4 py-3 font-medium text-slate-900">{{ $result['final_score'] ?? null === null ? '—' : $result['final_score'] }}</td>
+                                <td class="px-4 py-3 font-medium text-slate-900">{{ $result['final_score'] ?? '—' }}</td>
                                 <td class="max-w-xs px-4 py-3 text-slate-600">{{ $result['inquiry_message'] ?? '—' }}</td>
                                 <td class="max-w-xs px-4 py-3 text-slate-600">{{ $result['reasoning'] ?? '—' }}</td>
                                 <td class="px-4 py-3 text-right">

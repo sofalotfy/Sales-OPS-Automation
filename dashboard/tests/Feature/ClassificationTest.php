@@ -241,6 +241,101 @@ class ClassificationTest extends TestCase
             ->assertSee('None.');
     }
 
+    public function test_show_renders_the_final_score_value(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeClassificationResult(UpstreamStubs::classificationDetail(id: 1, score: 41.5));
+
+        $this->get(route('classification.show', 1))
+            ->assertOk()
+            ->assertSee('Final score')
+            ->assertSee('41.5');
+    }
+
+    public function test_index_renders_the_final_score_value(): void
+    {
+        $this->signIn();
+        $this->stubIndex(
+            fn () => Http::response([
+                'factors' => [UpstreamStubs::factor(name: 'scope_relevance', weight: 0.5)],
+                'stored' => ['scope_relevance' => 0.5],
+            ], 200),
+            fn () => Http::response([
+                'items' => [UpstreamStubs::classificationResult(id: 2, score: 41.5)],
+                'total' => 1,
+                'limit' => 20,
+                'offset' => 0,
+            ], 200),
+        );
+
+        $this->get(route('classification.index'))
+            ->assertOk()
+            ->assertSee('41.5');
+    }
+
+    public function test_show_renders_full_contact_details(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeClassificationResult(UpstreamStubs::classificationDetail(id: 1));
+
+        $this->get(route('classification.show', 1))
+            ->assertOk()
+            ->assertSee('Ada Lovelace')
+            ->assertSee('ada@example.com')
+            ->assertSee('+1 555 0132')
+            ->assertSee('United Kingdom');
+    }
+
+    public function test_show_renders_run_details(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeClassificationResult(UpstreamStubs::classificationDetail(id: 1));
+
+        $this->get(route('classification.show', 1))
+            ->assertOk()
+            ->assertSee('Run details')
+            ->assertSee('Scope check')
+            ->assertSee('Within the served scope.')
+            ->assertSee('Retrieved context (1)')
+            ->assertSee('Yes we do.')
+            ->assertSee('campaign-1')
+            ->assertSee('lead-1');
+    }
+
+    public function test_show_renders_refusal_when_recorded(): void
+    {
+        $this->signIn();
+        UpstreamStubs::fakeClassificationResult(UpstreamStubs::classificationDetail(
+            id: 1,
+            refusal: 'We are not able to help with this inquiry.',
+        ));
+
+        $this->get(route('classification.show', 1))
+            ->assertOk()
+            ->assertSee('Refusal')
+            ->assertSee('We are not able to help with this inquiry.');
+    }
+
+    public function test_show_omits_run_details_when_nothing_was_recorded(): void
+    {
+        $this->signIn();
+        $detail = UpstreamStubs::classificationDetail(id: 1);
+        unset(
+            $detail['scope_check_outcome'],
+            $detail['scope_check_reason'],
+            $detail['retrieved_context'],
+            $detail['campaign_id'],
+            $detail['lead_id'],
+            $detail['updated_at'],
+        );
+        UpstreamStubs::fakeClassificationResult($detail);
+
+        $this->get(route('classification.show', 1))
+            ->assertOk()
+            ->assertDontSee('Run details')
+            ->assertDontSee('Retrieved context');
+    }
+
     public function test_show_renders_candidate_filter_audit(): void
     {
         $this->signIn();

@@ -6,7 +6,6 @@ use Tests\TestCase;
 
 class TestConsolePageTest extends TestCase
 {
-
     public function test_health_endpoint_responds_ok(): void
     {
         $this->getJson('/health')
@@ -31,5 +30,18 @@ class TestConsolePageTest extends TestCase
         $response->assertDontSee('id="name"', false);
         $response->assertSee('Send inquiry', false);
         $response->assertSee('inquiry-form', false);
+    }
+
+    public function test_test_console_only_enqueues_and_does_not_render_run_results(): void
+    {
+        $response = $this->get('/');
+
+        $response->assertOk();
+        $response->assertSee('id="status"', false);
+        $response->assertSee('Queued', false);
+        $response->assertDontSee('Factor scores', false);
+        $response->assertDontSee('Dropped factors', false);
+        $response->assertDontSee('System prompt', false);
+        $response->assertDontSee('setInterval', false);
     }
 }

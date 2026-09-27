@@ -105,14 +105,20 @@ class UpstreamStubs
         string $message = 'Do you offer annual maintenance contracts?',
         string $reasoning = 'Matched scope.',
         ?string $status = 'succeeded',
+        ?string $refusal = null,
     ): array {
         return [
             'id' => $id,
             'status' => $status,
+            'campaign_id' => 'campaign-1',
+            'lead_id' => 'lead-1',
             'inquiry_message' => $message,
             'first_name' => 'Ada',
             'last_name' => 'Lovelace',
             'email' => 'ada@example.com',
+            'phone_number' => '+1 555 0132',
+            'company_name' => 'Example Corp',
+            'country_region' => 'United Kingdom',
             'classification' => $classification,
             'final_score' => $score,
             'reasoning' => $reasoning,
@@ -131,6 +137,7 @@ class UpstreamStubs
             'system_prompt' => "You are the sales triage assistant for Example Corp's served scope.\n\nSERVED SCOPE\nEnterprise automation tooling.",
             'scope_check_outcome' => 'accept',
             'scope_check_reason' => 'Within the served scope.',
+            'refusal' => $refusal,
             'web_research_outcome' => 'accept',
             'web_research_reason' => 'Web research completed.',
             'web_research' => [
@@ -164,6 +171,7 @@ class UpstreamStubs
                 ],
             ],
             'created_at' => '2026-09-14T10:00:00+00:00',
+            'updated_at' => '2026-09-14T10:07:00+00:00',
         ];
     }
 
